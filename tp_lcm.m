@@ -8,7 +8,7 @@ if sum(A) == sum(B)
 else
     fprintf('Given transportation problem is unbalanced')
     if sum(A) < sum(B)
-        Cost(end+1, :) = zeros(1, size(A,2));
+        Cost(end+1, :) = zeros(1, size(B,2));
         A(end+1) = sum(B) - sum(A);
     elseif sum(B) < sum(A)
         Cost(:, end+1) = zeros(1, size(A, 2));
