@@ -1,8 +1,9 @@
 clc
 clear all
-Cost=[11 13 17 14; 16 18 14 10; 21 24 13 10]
-A=[250 300 400];
-B=[200 225 275 250];
+Cost=[11 20 7 8; 21 16 10 12; 8 12 18 9]
+A=[50 40 70];
+B=[30 25 35 40];
+
 if sum(A) == sum(B)
     fprintf('Given transportation problem is balanced')
 else
@@ -11,7 +12,7 @@ else
         Cost(end+1, :) = zeros(1, size(B,2));
         A(end+1) = sum(B) - sum(A);
     elseif sum(B) < sum(A)
-        Cost(:, end+1) = zeros(1, size(A, 2));
+        Cost(:, end+1) = zeros(size(A, 2),1);
         B(end+1) = sum(A) - sum(B);
     end
 end
@@ -40,6 +41,7 @@ end
 fprintf('Initial BFS\n');
 IBFS = array2table(X);
 disp(IBFS);
+
 TotalBFS = length(nonzeros(X));
 if TotalBFS == BFS
     fprintf('Initial BFS is non degenerate\n')
@@ -47,4 +49,4 @@ else
     fprintf('Initial BFS is degenerate\n')
 end
 
-InitialCost = sum(sum(Icost .* X)) 
+InitialCost = sum(sum(Icost .* X))
