@@ -1,11 +1,11 @@
-import snowflake.connector
+import jaydebeapi
 from dotenv import load_dotenv
 import os
 
-# ✅ Load environment variables
+# Load environment variables
 load_dotenv()
 
-# ✅ Fetch values from .env
+# Fetch values
 user = os.getenv("SNOWFLAKE_USER")
 password = os.getenv("SNOWFLAKE_PASSWORD")
 account = os.getenv("SNOWFLAKE_ACCOUNT")
@@ -14,28 +14,34 @@ database = os.getenv("SNOWFLAKE_DATABASE")
 schema = os.getenv("SNOWFLAKE_SCHEMA")
 role = os.getenv("SNOWFLAKE_ROLE")
 
-# ✅ Connect to Snowflake
+# JDBC connection string
+jdbc_url = (
+    f"jdbc:snowflake://{account}.snowflakecomputing.com/?"
+    f"warehouse={warehouse}&db={database}&schema={schema}&role={role}"
+)
+
+# Path to your downloaded Snowflake JDBC jar
+jdbc_driver_path = "snowflake-jdbc-3.13.25.jar"
+jdbc_driver_class = "net.snowflake.client.jdbc.SnowflakeDriver"
+
+# Connect using JayDeBeApi
 try:
-    conn = snowflake.connector.connect(
-        user=user,
-        password=password,
-        account=account,
-        warehouse=warehouse,
-        database=database,
-        schema=schema,
-        role=role  # Optional
+    conn = jaydebeapi.connect(
+        jclassname=jdbc_driver_class,
+        url=jdbc_url,
+        driver_args=[user, password],
+        jars=jdbc_driver_path
     )
 
-    # ✅ Run a sample query
     cursor = conn.cursor()
-    cursor.execute(f"SELECT * FROM {schema}.CHATHAM_BNYM_RESPONDENT LIMIT 10")
-    rows = cursor.fetchall()
+    cursor.execute("SELECT CURRENT_USER(), CURRENT_DATABASE(), CURRENT_SCHEMA()")
+    results = cursor.fetchall()
 
-    for row in rows:
+    for row in results:
         print(row)
 
     cursor.close()
     conn.close()
 
 except Exception as e:
-    print("❌ Snowflake error:", e)
+    print("❌ JDBC Snowflake connection failed:", e)
