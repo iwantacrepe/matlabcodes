@@ -1,1 +1,41 @@
-pip install pandas sqlalchemy snowflake-connector-python vertica-python openpyxl python-dotenv
+import snowflake.connector
+from dotenv import load_dotenv
+import os
+
+# ✅ Load environment variables
+load_dotenv()
+
+# ✅ Fetch values from .env
+user = os.getenv("SNOWFLAKE_USER")
+password = os.getenv("SNOWFLAKE_PASSWORD")
+account = os.getenv("SNOWFLAKE_ACCOUNT")
+warehouse = os.getenv("SNOWFLAKE_WAREHOUSE")
+database = os.getenv("SNOWFLAKE_DATABASE")
+schema = os.getenv("SNOWFLAKE_SCHEMA")
+role = os.getenv("SNOWFLAKE_ROLE")
+
+# ✅ Connect to Snowflake
+try:
+    conn = snowflake.connector.connect(
+        user=user,
+        password=password,
+        account=account,
+        warehouse=warehouse,
+        database=database,
+        schema=schema,
+        role=role  # Optional
+    )
+
+    # ✅ Run a sample query
+    cursor = conn.cursor()
+    cursor.execute(f"SELECT * FROM {schema}.CHATHAM_BNYM_RESPONDENT LIMIT 10")
+    rows = cursor.fetchall()
+
+    for row in rows:
+        print(row)
+
+    cursor.close()
+    conn.close()
+
+except Exception as e:
+    print("❌ Snowflake error:", e)
