@@ -1,0 +1,1 @@
+pip install pandas sqlalchemy snowflake-connector-python vertica-python openpyxl python-dotenv
