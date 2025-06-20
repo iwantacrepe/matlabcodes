@@ -49,12 +49,10 @@ def get_columns(conn, query):
     cursor.close()
     return columns
 
-def compare_columns(sf_cols, vt_cols):
+def get_missing_columns(sf_cols, vt_cols):
     sf_set = set([c.lower() for c in sf_cols])
     vt_set = set([c.lower() for c in vt_cols])
-    missing = sorted(list(sf_set - vt_set))
-    extra = sorted(list(vt_set - sf_set))
-    return missing, extra
+    return sorted(list(sf_set - vt_set))
 
 def main():
     schema_name = "ER1"
@@ -62,15 +60,16 @@ def main():
     vt_conn = connect_to_vertica()
 
     try:
+        # Get all table names
         sf_tables = get_table_list(sf_conn, f"SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{schema_name}'")
         vt_tables = get_table_list(vt_conn, f"SELECT table_name FROM v_catalog.tables WHERE table_schema = '{schema_name}'")
-
         vt_table_lookup = {t.lower(): t for t in vt_tables}
         common_tables = [t for t in sf_tables if t.lower() in vt_table_lookup]
 
         all_rows = []
 
         for table in common_tables:
+            # Get column lists
             sf_cols = get_columns(sf_conn, f"""
                 SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
                 WHERE TABLE_NAME = '{table}' AND TABLE_SCHEMA = '{schema_name}'
@@ -80,25 +79,24 @@ def main():
                 WHERE table_schema = '{schema_name}' AND table_name = '{table.lower()}'
             """)
 
-            missing_in_vertica, extra_in_vertica = compare_columns(sf_cols, vt_cols)
-            max_len = max(len(missing_in_vertica), len(extra_in_vertica))
+            # Compare: Show only columns in Snowflake that are missing in Vertica
+            missing = get_missing_columns(sf_cols, vt_cols)
 
-            for i in range(max_len):
+            for col in missing:
                 all_rows.append({
                     "Table Name": table,
-                    "Missing Column in Vertica": missing_in_vertica[i] if i < len(missing_in_vertica) else '',
-                    "Extra Column in Vertica": extra_in_vertica[i] if i < len(extra_in_vertica) else ''
+                    "Missing Column in Vertica": col
                 })
 
-        # Save to Excel if there are mismatches
+        # Write to Excel if mismatches found
         if all_rows:
             df = pd.DataFrame(all_rows)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-            output_file = f"{schema_name}_column_comparison_{timestamp}.xlsx"
-            df.to_excel(output_file, sheet_name="FullComparison", index=False)
-            print(f"\n✅ Comparison report saved to: {output_file}")
+            output_file = f"{schema_name}_missing_columns_only_{timestamp}.xlsx"
+            df.to_excel(output_file, sheet_name="MissingOnly", index=False)
+            print(f"\n✅ Report saved to: {output_file}")
         else:
-            print("\n✅ All columns match across all common tables. No differences to report.")
+            print("\n✅ All columns in Snowflake exist in Vertica. No missing columns found.")
 
     finally:
         sf_conn.close()
