@@ -1,210 +1,143 @@
-Here is your revised 15-day theoretical project report, fully excluding Power BI and Pentaho testing, and focusing purely on Python-based validation between Vertica and Snowflake:
-
-
----
-
-Title: Data Validation Between Vertica and Snowflake Using Python
-
-
----
-
-Objective:
-
-To build a robust Python-based solution for comparing table schemas and data between Vertica and Snowflake databases, especially when primary keys are not explicitly defined in Vertica.
-
-
----
-
-📅 Timeline: 15-Day Execution Plan
-
-
----
-
-1. Connection Setup (Days 1–3)
-
-🔹 Description:
-
-Establish secure, production-compatible Python connections to both Vertica and Snowflake environments.
-
-✅ Tasks:
-
-Setup .env configuration for sensitive variables
-
-Use vertica_python for Vertica connection
-
-Use snowflake-connector-python for Snowflake connection
-
-Validate connections by executing test queries
-
-
-🎯 Deliverable:
-
-Verified scripts that securely connect and query both databases.
-
-
----
-
-2. Comparison Logic Design (Days 4–7)
-
-🔹 Description:
-
-Design logic for comparing both schema (DDL) and data content, considering the absence of primary keys in Vertica.
-
-✅ Tasks:
-
-DDL Comparison:
-
-Use information_schema.columns to extract table structure
-
-Compare column names, data types, nullability, and order
-
-
-Data Comparison:
-
-For tables with known unique identifiers, use FULL OUTER JOIN
-
-For tables without keys, apply:
-
-Row-level SHA256 hashing
-
-Sampling or column-based matching heuristics
-
-
-
-
-🎯 Deliverable:
-
-Reusable logic framework that covers schema and data comparison even without strict keys.
-
-
----
-
-3. Pilot Run on Sample Tables (Days 8–9)
-
-🔹 Description:
-
-Test the entire logic on a small batch of tables to confirm correctness, handle edge cases, and benchmark processing.
-
-✅ Tasks:
-
-Select 3–5 diverse tables
-
-Run DDL and data comparison scripts
-
-Handle mismatches like:
-
-Casing issues (e.g., Snowflake = UPPERCASE)
-
-Data type mismatches
-
-Missing/null value inconsistencies
-
-
-Log mismatched row count and key insights
-
-
-🎯 Deliverable:
-
-Initial evidence and refinement opportunity for scaling.
-
-
----
-
-4. Scaling the Comparison Approach (Days 10–12)
-
-🔹 Description:
-
-Prepare the system to handle 400+ tables automatically in batches.
-
-✅ Tasks:
-
-Loop through metadata tables to generate dynamic queries
-
-Log all results (mismatches, missing rows, schema diffs)
-
-Implement row limit or sampling where tables are very large
-
-Add exclusions (e.g., insert_ts, audit columns)
-
-
-🎯 Deliverable:
-
-Fully automated Python solution that compares all target tables end-to-end.
-
-
----
-
-5. Output Structuring and Finalization (Day 13)
-
-🔹 Description:
-
-Design and finalize the format in which results will be exported.
-
-✅ Tasks:
-
-Structure outputs as:
-
-Summary CSV: table-wise match status
-
-Detailed CSVs: mismatch logs with row-wise details
-
-
-Tag each row: "MATCHED", "ONLY_IN_VERTICA", "ONLY_IN_SNOWFLAKE", "MISMATCHED"
-
-Maintain clean folder structure for ease of access
-
-
-🎯 Deliverable:
-
-Human-readable, report-ready outputs suitable for handoff or audit.
-
-
----
-
-6. Buffer + Documentation (Days 14–15)
-
-🔹 Description:
-
-Allocate final days for buffer handling, edge case fixes, and documentation.
-
-✅ Tasks:
-
-Handle unexpected errors (e.g., connection timeouts, permission issues)
-
-Write documentation for:
-
-Setup steps
-
-Configuration instructions
-
-How to run and interpret results
-
-
-Package the project in a sharable format
-
-
-🎯 Deliverable:
-
-Well-documented, maintainable, and ready-to-use comparison pipeline.
-
-
----
-
-Final Output Includes:
-
-Comparison summary (summary.csv)
-
-Table-specific mismatch logs
-
-Logs for schema mismatches
-
-Clean codebase with reusable functions and configs
-
-End-to-end run guide with examples
-
-
-
----
-
-Let me know if you want this report exported to Word or PDF format, or if you'd like a Gantt-style visualization too.
-
+import snowflake.connector
+import vertica_python
+import os
+import pandas as pd
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+table_name = "CHATHAM_BNYM_RESPONDENT"
+schema_name = "ER1"
+
+def connect_to_snowflake():
+    print("Connecting to Snowflake...")
+    conn = snowflake.connector.connect(
+        account=os.getenv("URL_SF").split("//")[-1].split(".snowflakecomputing.com")[0],
+        user=os.getenv("USER_SDL_SF"),
+        private_key_file=os.path.join(os.getenv("DATA_ROOT"), os.getenv("KEYTAB_FILE_SDL_SF")),
+        private_key_password=os.getenv("PASSWORD_SDL_SF"),
+        database=os.getenv("DB_SDL_SF"),
+        schema=os.getenv("SCHEMA_SDL_SF"),
+        warehouse=os.getenv("WAREHOUSE_SDL_SF"),
+        role=os.getenv("ROLE_SDL_SF"),
+        authenticator='SNOWFLAKE_JWT'
+    )
+    print("Snowflake connected.")
+    return conn
+
+def connect_to_vertica():
+    print("Connecting to Vertica...")
+    conn = vertica_python.connect(
+        host=os.getenv("VERTICA_HOST"),
+        port=5433,
+        user=os.getenv("VERTICA_USER"),
+        password=os.getenv("VERTICA_PASSWORD"),
+        database=os.getenv("VERTICA_DB"),
+        autocommit=True
+    )
+    print("Vertica connected.")
+    return conn
+
+def get_snowflake_schema(conn, table_name):
+    with conn.cursor() as cursor:
+        cursor.execute(f"DESCRIBE TABLE {schema_name}.{table_name}")
+        columns = pd.DataFrame(cursor.fetchall(), columns=[desc[0] for desc in cursor.description])
+        
+        cursor.execute(f"""
+            SELECT COLUMN_NAME 
+            FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE 
+            WHERE TABLE_NAME = '{table_name}' 
+              AND TABLE_SCHEMA = '{schema_name}'
+              AND CONSTRAINT_NAME LIKE 'PK%'
+        """)
+        pk_columns = [row[0] for row in cursor.fetchall()]
+        return columns, pk_columns
+
+def get_vertica_schema(conn, table_name):
+    cursor = conn.cursor()
+    cursor.execute(f"""
+        SELECT column_name, data_type, is_nullable 
+        FROM v_catalog.columns 
+        WHERE table_schema = '{schema_name}' AND table_name = '{table_name}'
+    """)
+    columns = pd.DataFrame(cursor.fetchall(), columns=['name', 'type', 'nullable'])
+
+    cursor.execute(f"""
+        SELECT column_name 
+        FROM v_catalog.primary_keys 
+        WHERE table_schema = '{schema_name}' AND table_name = '{table_name}'
+    """)
+    pk_columns = [row[0] for row in cursor.fetchall()]
+    cursor.close()
+    return columns, pk_columns
+
+def compare_schemas(sf_schema, vertica_schema):
+    sf_cols, sf_pks = sf_schema
+    vertica_cols, vertica_pks = vertica_schema
+
+    sf_col_names = set(sf_cols['name'].str.lower())
+    vertica_col_names = set(vertica_cols['name'].str.lower())
+
+    only_in_sf = sf_col_names - vertica_col_names
+    only_in_vertica = vertica_col_names - sf_col_names
+    common_columns = sf_col_names & vertica_col_names
+
+    type_mismatches = []
+    for col in common_columns:
+        sf_type = sf_cols[sf_cols['name'].str.lower() == col]['type'].values[0]
+        vt_type = vertica_cols[vertica_cols['name'].str.lower() == col]['type'].values[0]
+        if sf_type.lower() != vt_type.lower():
+            type_mismatches.append((col, sf_type, vt_type))
+
+    sf_pks = [pk.lower() for pk in sf_pks]
+    vertica_pks = [pk.lower() for pk in vertica_pks]
+    pk_diff = set(sf_pks) != set(vertica_pks)
+
+    return {
+        'only_in_snowflake': only_in_sf,
+        'only_in_vertica': only_in_vertica,
+        'type_mismatches': type_mismatches,
+        'pk_differences': pk_diff,
+        'sf_pks': sf_pks,
+        'vertica_pks': vertica_pks
+    }
+
+def main():
+    sf_conn = connect_to_snowflake()
+    vertica_conn = connect_to_vertica()
+
+    try:
+        print(f"\nFetching schema for {schema_name}.{table_name}...")
+        sf_schema = get_snowflake_schema(sf_conn, table_name)
+        vt_schema = get_vertica_schema(vertica_conn, table_name)
+
+        print("\nComparing schemas...")
+        result = compare_schemas(sf_schema, vt_schema)
+
+        print("\n=== SCHEMA COMPARISON ===")
+        print("Only in Snowflake:", result['only_in_snowflake'] or "None")
+        print("Only in Vertica:", result['only_in_vertica'] or "None")
+
+        print("\nType Mismatches:")
+        if result['type_mismatches']:
+            for col, sf, vt in result['type_mismatches']:
+                print(f"  - {col}: Snowflake={sf}, Vertica={vt}")
+        else:
+            print("  None")
+
+        print("\nPrimary Key Differences:")
+        if result['pk_differences']:
+            print("  ❌ PK mismatch")
+            print("  Snowflake PKs:", result['sf_pks'])
+            print("  Vertica PKs:", result['vertica_pks'])
+        else:
+            print("  ✅ PKs match")
+
+    finally:
+        sf_conn.close()
+        vertica_conn.close()
+        print("\nConnections closed.")
+
+if __name__ == "__main__":
+    main()
