@@ -3,32 +3,30 @@ import vertica_python
 import os
 import pandas as pd
 from dotenv import load_dotenv
+from datetime import datetime
 
-# Load environment variables
+pd.set_option("display.max_rows", None)
+pd.set_option("display.max_columns", None)
+pd.set_option("display.width", None)
+pd.set_option("display.max_colwidth", None)
+
 load_dotenv()
 
-table_name = "CHATHAM_BNYM_RESPONDENT"
-schema_name = "ER1"
-
 def connect_to_snowflake():
-    print("Connecting to Snowflake...")
-    conn = snowflake.connector.connect(
+    return snowflake.connector.connect(
         account=os.getenv("URL_SF").split("//")[-1].split(".snowflakecomputing.com")[0],
         user=os.getenv("USER_SDL_SF"),
         private_key_file=os.path.join(os.getenv("DATA_ROOT"), os.getenv("KEYTAB_FILE_SDL_SF")),
-        private_key_password=os.getenv("PASSWORD_SDL_SF"),
+        private_key_file_pwd=os.getenv("PASSWORD_SDL_SF"),
         database=os.getenv("DB_SDL_SF"),
         schema=os.getenv("SCHEMA_SDL_SF"),
         warehouse=os.getenv("WAREHOUSE_SDL_SF"),
         role=os.getenv("ROLE_SDL_SF"),
         authenticator='SNOWFLAKE_JWT'
     )
-    print("Snowflake connected.")
-    return conn
 
 def connect_to_vertica():
-    print("Connecting to Vertica...")
-    conn = vertica_python.connect(
+    return vertica_python.connect(
         host=os.getenv("VERTICA_HOST"),
         port=5433,
         user=os.getenv("VERTICA_USER"),
@@ -36,108 +34,75 @@ def connect_to_vertica():
         database=os.getenv("VERTICA_DB"),
         autocommit=True
     )
-    print("Vertica connected.")
-    return conn
 
-def get_snowflake_schema(conn, table_name):
-    with conn.cursor() as cursor:
-        cursor.execute(f"DESCRIBE TABLE {schema_name}.{table_name}")
-        columns = pd.DataFrame(cursor.fetchall(), columns=[desc[0] for desc in cursor.description])
-        
-        cursor.execute(f"""
-            SELECT COLUMN_NAME 
-            FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE 
-            WHERE TABLE_NAME = '{table_name}' 
-              AND TABLE_SCHEMA = '{schema_name}'
-              AND CONSTRAINT_NAME LIKE 'PK%'
-        """)
-        pk_columns = [row[0] for row in cursor.fetchall()]
-        return columns, pk_columns
-
-def get_vertica_schema(conn, table_name):
+def get_table_list(conn, query):
     cursor = conn.cursor()
-    cursor.execute(f"""
-        SELECT column_name, data_type, is_nullable 
-        FROM v_catalog.columns 
-        WHERE table_schema = '{schema_name}' AND table_name = '{table_name}'
-    """)
-    columns = pd.DataFrame(cursor.fetchall(), columns=['name', 'type', 'nullable'])
-
-    cursor.execute(f"""
-        SELECT column_name 
-        FROM v_catalog.primary_keys 
-        WHERE table_schema = '{schema_name}' AND table_name = '{table_name}'
-    """)
-    pk_columns = [row[0] for row in cursor.fetchall()]
+    cursor.execute(query)
+    tables = [row[0] for row in cursor.fetchall()]
     cursor.close()
-    return columns, pk_columns
+    return tables
 
-def compare_schemas(sf_schema, vertica_schema):
-    sf_cols, sf_pks = sf_schema
-    vertica_cols, vertica_pks = vertica_schema
+def get_columns(conn, query):
+    cursor = conn.cursor()
+    cursor.execute(query)
+    columns = [row[0] for row in cursor.fetchall()]
+    cursor.close()
+    return columns
 
-    sf_col_names = set(sf_cols['name'].str.lower())
-    vertica_col_names = set(vertica_cols['name'].str.lower())
-
-    only_in_sf = sf_col_names - vertica_col_names
-    only_in_vertica = vertica_col_names - sf_col_names
-    common_columns = sf_col_names & vertica_col_names
-
-    type_mismatches = []
-    for col in common_columns:
-        sf_type = sf_cols[sf_cols['name'].str.lower() == col]['type'].values[0]
-        vt_type = vertica_cols[vertica_cols['name'].str.lower() == col]['type'].values[0]
-        if sf_type.lower() != vt_type.lower():
-            type_mismatches.append((col, sf_type, vt_type))
-
-    sf_pks = [pk.lower() for pk in sf_pks]
-    vertica_pks = [pk.lower() for pk in vertica_pks]
-    pk_diff = set(sf_pks) != set(vertica_pks)
-
-    return {
-        'only_in_snowflake': only_in_sf,
-        'only_in_vertica': only_in_vertica,
-        'type_mismatches': type_mismatches,
-        'pk_differences': pk_diff,
-        'sf_pks': sf_pks,
-        'vertica_pks': vertica_pks
-    }
+def compare_columns(sf_cols, vt_cols):
+    sf_set = set([c.lower() for c in sf_cols])
+    vt_set = set([c.lower() for c in vt_cols])
+    missing = sorted(list(sf_set - vt_set))
+    extra = sorted(list(vt_set - sf_set))
+    return missing, extra
 
 def main():
+    schema_name = "ER1"
     sf_conn = connect_to_snowflake()
-    vertica_conn = connect_to_vertica()
+    vt_conn = connect_to_vertica()
 
     try:
-        print(f"\nFetching schema for {schema_name}.{table_name}...")
-        sf_schema = get_snowflake_schema(sf_conn, table_name)
-        vt_schema = get_vertica_schema(vertica_conn, table_name)
+        sf_tables = get_table_list(sf_conn, f"SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{schema_name}'")
+        vt_tables = get_table_list(vt_conn, f"SELECT table_name FROM v_catalog.tables WHERE table_schema = '{schema_name}'")
 
-        print("\nComparing schemas...")
-        result = compare_schemas(sf_schema, vt_schema)
+        vt_table_lookup = {t.lower(): t for t in vt_tables}
+        common_tables = [t for t in sf_tables if t.lower() in vt_table_lookup]
 
-        print("\n=== SCHEMA COMPARISON ===")
-        print("Only in Snowflake:", result['only_in_snowflake'] or "None")
-        print("Only in Vertica:", result['only_in_vertica'] or "None")
+        all_rows = []
 
-        print("\nType Mismatches:")
-        if result['type_mismatches']:
-            for col, sf, vt in result['type_mismatches']:
-                print(f"  - {col}: Snowflake={sf}, Vertica={vt}")
+        for table in common_tables:
+            sf_cols = get_columns(sf_conn, f"""
+                SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_NAME = '{table}' AND TABLE_SCHEMA = '{schema_name}'
+            """)
+            vt_cols = get_columns(vt_conn, f"""
+                SELECT column_name FROM v_catalog.columns
+                WHERE table_schema = '{schema_name}' AND table_name = '{table.lower()}'
+            """)
+
+            missing_in_vertica, extra_in_vertica = compare_columns(sf_cols, vt_cols)
+            max_len = max(len(missing_in_vertica), len(extra_in_vertica))
+
+            for i in range(max_len):
+                all_rows.append({
+                    "Table Name": table,
+                    "Missing Column in Vertica": missing_in_vertica[i] if i < len(missing_in_vertica) else '',
+                    "Extra Column in Vertica": extra_in_vertica[i] if i < len(extra_in_vertica) else ''
+                })
+
+        # Save to Excel if there are mismatches
+        if all_rows:
+            df = pd.DataFrame(all_rows)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+            output_file = f"{schema_name}_column_comparison_{timestamp}.xlsx"
+            df.to_excel(output_file, sheet_name="FullComparison", index=False)
+            print(f"\n✅ Comparison report saved to: {output_file}")
         else:
-            print("  None")
-
-        print("\nPrimary Key Differences:")
-        if result['pk_differences']:
-            print("  ❌ PK mismatch")
-            print("  Snowflake PKs:", result['sf_pks'])
-            print("  Vertica PKs:", result['vertica_pks'])
-        else:
-            print("  ✅ PKs match")
+            print("\n✅ All columns match across all common tables. No differences to report.")
 
     finally:
         sf_conn.close()
-        vertica_conn.close()
-        print("\nConnections closed.")
+        vt_conn.close()
 
 if __name__ == "__main__":
     main()
