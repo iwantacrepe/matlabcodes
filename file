@@ -1,38 +1,37 @@
 import os
 import hashlib
 import pandas as pd
-import logging
-
 import snowflake.connector
 import vertica_python
 from dotenv import load_dotenv
 
-# –– Configuration ––
+#–– Configuration ––#
 load_dotenv()
 SCHEMA     = os.getenv("ER1_SCHEMA", "ER1")
 TABLE      = "CLIENT_PROFILE_INFO"
-BATCH_SIZE = 10000
+BATCH_SIZE = 10000  # tune as needed
 
-# –– Logging Setup ––
-logging.basicConfig(
-    filename="row_comparison.log",
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s"
-)
-logger = logging.getLogger(__name__)
+pd.set_option("display.max_rows", None)
+pd.set_option("display.max_columns", None)
+pd.set_option("display.width", None)
+pd.set_option("display.max_colwidth", None)
 
-# –– Helpers ––
+#–– Helpers ––#
 def normalize(name: str) -> str:
     return name.casefold()
 
-def generate_row_hash(row, cols):
-    # Concatenate values in the specified order, then MD5
-    concat = "|".join(str(row[c]) for c in cols)
-    return hashlib.md5(concat.encode("utf-8")).hexdigest()
+def compare_sets(a, b):
+    sa, sb = set(a), set(b)
+    return sorted(sa - sb), sorted(sb - sa), sorted(sa & sb)
 
+def generate_row_hash(row: pd.Series, cols: list) -> str:
+    # join with null marker for None
+    values = [(str(row[c]) if pd.notna(row[c]) else "<NULL>") for c in cols]
+    return hashlib.md5("|".join(values).encode("utf-8")).hexdigest()
+
+#–– Connections ––#
 def connect_to_snowflake():
-    logger.info("Connecting to Snowflake")
-    conn = snowflake.connector.connect(
+    return snowflake.connector.connect(
         account     = os.getenv("URL_SF").split("//")[-1].split(".snowflakecomputing.com")[0],
         user        = os.getenv("USER_SDL_SF"),
         private_key_file     = os.path.join(os.getenv("DATA_ROOT"), os.getenv("KEYTAB_FILE_SDL_SF")),
@@ -43,12 +42,9 @@ def connect_to_snowflake():
         role        = os.getenv("ROLE_SDL_SF"),
         authenticator = "SNOWFLAKE_JWT"
     )
-    logger.info("Connected to Snowflake")
-    return conn
 
 def connect_to_vertica():
-    logger.info("Connecting to Vertica")
-    conn = vertica_python.connect(
+    return vertica_python.connect(
         host       = os.getenv("VERTICA_HOST"),
         port       = int(os.getenv("VERTICA_PORT", 5433)),
         user       = os.getenv("VERTICA_USER"),
@@ -56,46 +52,43 @@ def connect_to_vertica():
         database   = os.getenv("VERTICA_DB"),
         autocommit = True
     )
-    logger.info("Connected to Vertica")
-    return conn
 
-def get_columns(conn, table, schema, db="sf"):
-    if db == "sf":
-        sql = """
+#–– Schema Discovery ––#
+def get_snowflake_columns(conn, table, schema):
+    with conn.cursor() as cur:
+        cur.execute("""
             SELECT column_name
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE table_schema = %s
-              AND table_name   = %s
-            ORDER BY ordinal_position
-        """
-    else:
-        sql = """
-            SELECT column_name
-            FROM v_catalog.columns
-            WHERE table_schema = %s
-              AND UPPER(table_name) = UPPER(%s)
-            ORDER BY ordinal_position
-        """
+              FROM INFORMATION_SCHEMA.COLUMNS
+             WHERE table_schema = %s
+               AND table_name   = %s
+             ORDER BY ordinal_position
+        """, (schema, table))
+        return [r[0] for r in cur.fetchall()]
+
+def get_vertica_columns(conn, table, schema):
     cur = conn.cursor()
-    cur.execute(sql, (schema, table))
-    cols = [row[0] for row in cur.fetchall()]
+    cur.execute("""
+        SELECT column_name
+          FROM v_catalog.columns
+         WHERE table_schema = %s
+           AND UPPER(table_name) = UPPER(%s)
+         ORDER BY ordinal_position
+    """, (schema, table))
+    cols = [r[0] for r in cur.fetchall()]
     cur.close()
     return cols
 
+#–– Batch Fetch ––#
 def fetch_batches(conn, table, schema, cols, db="sf"):
-    """
-    Generator yielding DataFrame batches ordered by the given cols.
-    """
-    # Build SELECT list and ORDER BY clause
-    select_list = ", ".join(f'"{c}"' if db=="sf" else c for c in cols)
-    order_by    = select_list
+    order_by    = ", ".join(f'"{c}"' if db=="sf" else c for c in cols)
+    select_cols = ", ".join(f'"{c}"' if db=="sf" else c for c in cols)
 
     if db == "sf":
-        base_query = f'SELECT {select_list} FROM "{schema}"."{table}"'
+        base = f'SELECT {select_cols} FROM "{schema}"."{table}"'
     else:
-        base_query = f"SELECT {select_list} FROM {schema}.{table}"
+        base = f'SELECT {select_cols} FROM {schema}.{table}'
 
-    query = f"{base_query} ORDER BY {order_by} LIMIT %s OFFSET %s"
+    query = f"{base} ORDER BY {order_by} LIMIT %s OFFSET %s"
     offset = 0
 
     while True:
@@ -103,75 +96,85 @@ def fetch_batches(conn, table, schema, cols, db="sf"):
         cur.execute(query, (BATCH_SIZE, offset))
         rows = cur.fetchall()
         cur.close()
-
         if not rows:
             break
-
         yield pd.DataFrame(rows, columns=cols)
         offset += BATCH_SIZE
 
-def compare_table(sf_conn, vt_conn, table, schema):
-    logger.info(f"Starting comparison for table `{table}`")
-
-    # 1) Discover and align common columns
-    sf_cols = get_columns(sf_conn, table, schema, db="sf")
-    vt_cols = get_columns(vt_conn, table, schema, db="vt")
-    common = [c for c in sf_cols if normalize(c) in {normalize(v) for v in vt_cols}]
-
-    if not common:
-        logger.error(f"No common columns found for `{table}`. Aborting.")
-        return
-
-    logger.info(f"Common columns (in order): {common}")
-
-    # 2) Batch-wise row-by-row hash comparison
-    sf_batches = fetch_batches(sf_conn, table, schema, common, db="sf")
-    vt_batches = fetch_batches(vt_conn, table, schema, common, db="vt")
-
-    mismatches = 0
-    batch_no   = 0
-
-    while True:
-        try:
-            sf_df = next(sf_batches)
-            vt_df = next(vt_batches)
-        except StopIteration:
-            break
-
-        # Check batch row counts
-        if len(sf_df) != len(vt_df):
-            logger.error(f"Batch {batch_no}: row count mismatch — SF={len(sf_df)}, VT={len(vt_df)}")
-            mismatches += 1
-            break
-
-        # Compute hashes
-        sf_hash = sf_df.apply(lambda r: generate_row_hash(r, common), axis=1)
-        vt_hash = vt_df.apply(lambda r: generate_row_hash(r, common), axis=1)
-
-        # Identify mismatches
-        diff_mask = sf_hash.ne(vt_hash)
-        if diff_mask.any():
-            for idx in diff_mask[diff_mask].index:
-                sf_row = sf_df.loc[idx].to_dict()
-                vt_row = vt_df.loc[idx].to_dict()
-                logger.error(f"Batch {batch_no}, Row {idx} mismatch:")
-                logger.error(f"  Snowflake: {sf_row}")
-                logger.error(f"  Vertica  : {vt_row}")
-                mismatches += 1
-
-        batch_no += 1
-
-    if mismatches == 0:
-        logger.info("Comparison complete: No mismatches found.")
-    else:
-        logger.info(f"Comparison complete: {mismatches} mismatch(es) logged.")
-
-if __name__ == "__main__":
+#–– Main Comparison ––#
+def compare_client_profile():
     sf_conn = connect_to_snowflake()
     vt_conn = connect_to_vertica()
     try:
-        compare_table(sf_conn, vt_conn, TABLE, SCHEMA)
+        print(f"\n=== Comparing table: {TABLE} ===")
+
+        # Column-level
+        sf_cols = get_snowflake_columns(sf_conn, TABLE, SCHEMA)
+        vt_cols = get_vertica_columns(vt_conn, TABLE, SCHEMA)
+
+        only_sf_c, only_vt_c, common_cols = compare_sets(
+            [c.lower() for c in sf_cols],
+            [c.lower() for c in vt_cols]
+        )
+
+        print("\n-- Column Comparison --")
+        if only_sf_c:
+            print(f"Columns only in Snowflake: {only_sf_c}")
+        if only_vt_c:
+            print(f"Columns only in Vertica  : {only_vt_c}")
+        if not only_sf_c and not only_vt_c:
+            print("✅ Columns match case-insensitively.")
+        else:
+            # if columns differ, stop here
+            return
+
+        # recover original-case column list in Snowflake order
+        common = [c for c in sf_cols if c.lower() in common_cols]
+
+        # Row-level
+        print(f"\n-- Row-wise Comparison on columns: {common} --")
+        sf_batches = fetch_batches(sf_conn, TABLE, SCHEMA, common, db="sf")
+        vt_batches = fetch_batches(vt_conn, TABLE, SCHEMA, common, db="vt")
+
+        batch_num = 0
+        total_mismatches = 0
+
+        while True:
+            try:
+                sf_df = next(sf_batches)
+                vt_df = next(vt_batches)
+            except StopIteration:
+                break
+
+            # if counts differ in this batch
+            if len(sf_df) != len(vt_df):
+                print(f"❗ Batch {batch_num}: row count mismatch (SF={len(sf_df)}, VT={len(vt_df)})")
+                total_mismatches += abs(len(sf_df) - len(vt_df))
+                break
+
+            # compare row hashes
+            sf_hash = sf_df.apply(lambda r: generate_row_hash(r, common), axis=1)
+            vt_hash = vt_df.apply(lambda r: generate_row_hash(r, common), axis=1)
+
+            diffs = sf_hash != vt_hash
+            if diffs.any():
+                for idx in diffs[diffs].index:
+                    total_mismatches += 1
+                    print(f"\n>> Mismatch in batch {batch_num}, row {idx}:")
+                    print(" Snowflake Row:", sf_df.loc[idx].to_dict())
+                    print(" Vertica   Row:", vt_df.loc[idx].to_dict())
+
+            batch_num += 1
+
+        if total_mismatches == 0:
+            print("\n✅ No row-level mismatches found.")
+        else:
+            print(f"\n❌ Total mismatches: {total_mismatches}")
+
     finally:
         sf_conn.close()
         vt_conn.close()
-        logger.info("Connections closed.")
+        print("\nConnections closed.")
+
+if __name__ == "__main__":
+    compare_client_profile()
