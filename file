@@ -88,6 +88,9 @@ def fetch_batches(conn, table, schema, cols, db="sf"):
         yield pd.DataFrame(rows, columns=cols)
         offset += BATCH_SIZE
 
+def format_value(val):
+    return "N/A" if pd.isna(val) else str(val)
+
 def compare_client_profile():
     sf_conn = connect_to_snowflake()
     vt_conn = connect_to_vertica()
@@ -134,31 +137,35 @@ def compare_client_profile():
                         mismatch_records.append({
                             "TableName": TABLE,
                             "ColumnName": col,
-                            "MismatchedValueInVertica": vt_val,
-                            "MismatchedValueInSnowflake": sf_val
+                            "MismatchedValueInVertica": format_value(vt_val),
+                            "MismatchedValueInSnowflake": format_value(sf_val)
                         })
 
             for idx in range(min_len, len(sf_df)):
-                mismatch_records.append({
-                    "TableName": TABLE,
-                    "ColumnName": "EXTRA_ROW_SNOWFLAKE",
-                    "MismatchedValueInVertica": None,
-                    "MismatchedValueInSnowflake": sf_df.loc[idx].to_dict()
-                })
+                row_data = sf_df.loc[idx].to_dict()
+                for col in common:
+                    mismatch_records.append({
+                        "TableName": TABLE,
+                        "ColumnName": col,
+                        "MismatchedValueInVertica": "N/A",
+                        "MismatchedValueInSnowflake": f"EXTRA_ROW: {format_value(row_data.get(col))}"
+                    })
 
             for idx in range(min_len, len(vt_df)):
-                mismatch_records.append({
-                    "TableName": TABLE,
-                    "ColumnName": "EXTRA_ROW_VERTICA",
-                    "MismatchedValueInVertica": vt_df.loc[idx].to_dict(),
-                    "MismatchedValueInSnowflake": None
-                })
+                row_data = vt_df.loc[idx].to_dict()
+                for col in common:
+                    mismatch_records.append({
+                        "TableName": TABLE,
+                        "ColumnName": col,
+                        "MismatchedValueInVertica": f"EXTRA_ROW: {format_value(row_data.get(col))}",
+                        "MismatchedValueInSnowflake": "N/A"
+                    })
 
             batch_num += 1
 
         if mismatch_records:
             mismatch_df = pd.DataFrame(mismatch_records)
-            print("\n=== MISMATCHED VALUES ===")
+            print("\n=== FINAL MISMATCH REPORT ===")
             print(mismatch_df.to_string(index=False))
         else:
             print("✅ No mismatches found.")
