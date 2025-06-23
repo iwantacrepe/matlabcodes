@@ -1,13 +1,12 @@
 import os
-import hashlib
 import pandas as pd
 import snowflake.connector
 import vertica_python
 from dotenv import load_dotenv
 
 load_dotenv()
-SCHEMA     = os.getenv("ER1_SCHEMA", "ER1")
-TABLE      = "CLIENT_PROFILE_INFO"
+SCHEMA = os.getenv("ER1_SCHEMA", "ER1")
+TABLE = "CLIENT_PROFILE_INFO"
 BATCH_SIZE = 10000
 
 pd.set_option("display.max_rows", None)
@@ -102,7 +101,7 @@ def compare_client_profile():
         )
 
         if only_sf_c or only_vt_c:
-            print("Column mismatch found.")
+            print("❌ Column mismatch found.")
             print("Only in Snowflake:", only_sf_c)
             print("Only in Vertica:", only_vt_c)
             return
@@ -130,51 +129,39 @@ def compare_client_profile():
                     vt_val = vt_df.at[idx, col]
                     sf_na = pd.isna(sf_val)
                     vt_na = pd.isna(vt_val)
+
                     if (sf_na and not vt_na) or (not sf_na and vt_na) or (not sf_na and not vt_na and sf_val != vt_val):
                         mismatch_records.append({
-                            "batch": batch_num,
-                            "row_index": idx,
-                            "column": col,
-                            "snowflake_value": sf_val,
-                            "vertica_value": vt_val,
-                            "snowflake_row": sf_df.loc[idx].to_dict(),
-                            "vertica_row": vt_df.loc[idx].to_dict()
+                            "TableName": TABLE,
+                            "ColumnName": col,
+                            "MismatchedValueInVertica": vt_val,
+                            "MismatchedValueInSnowflake": sf_val
                         })
 
             for idx in range(min_len, len(sf_df)):
                 mismatch_records.append({
-                    "batch": batch_num,
-                    "row_index": idx,
-                    "column": "EXTRA_ROW_SNOWFLAKE",
-                    "snowflake_value": "ROW EXISTS",
-                    "vertica_value": "ROW MISSING",
-                    "snowflake_row": sf_df.loc[idx].to_dict(),
-                    "vertica_row": {}
+                    "TableName": TABLE,
+                    "ColumnName": "EXTRA_ROW_SNOWFLAKE",
+                    "MismatchedValueInVertica": None,
+                    "MismatchedValueInSnowflake": sf_df.loc[idx].to_dict()
                 })
 
             for idx in range(min_len, len(vt_df)):
                 mismatch_records.append({
-                    "batch": batch_num,
-                    "row_index": idx,
-                    "column": "EXTRA_ROW_VERTICA",
-                    "snowflake_value": "ROW MISSING",
-                    "vertica_value": "ROW EXISTS",
-                    "snowflake_row": {},
-                    "vertica_row": vt_df.loc[idx].to_dict()
+                    "TableName": TABLE,
+                    "ColumnName": "EXTRA_ROW_VERTICA",
+                    "MismatchedValueInVertica": vt_df.loc[idx].to_dict(),
+                    "MismatchedValueInSnowflake": None
                 })
 
             batch_num += 1
 
         if mismatch_records:
             mismatch_df = pd.DataFrame(mismatch_records)
-            print("\n=== MISMATCH SUMMARY ===")
-            print(mismatch_df[[
-                "batch", "row_index", "column", "snowflake_value", "vertica_value"
-            ]].to_string(index=False))
-            print("\n=== FULL ROW DIFFERENCES ===")
-            print(mismatch_df[["snowflake_row", "vertica_row"]].to_string(index=False))
+            print("\n=== MISMATCHED VALUES ===")
+            print(mismatch_df.to_string(index=False))
         else:
-            print("No mismatches found.")
+            print("✅ No mismatches found.")
 
     finally:
         sf_conn.close()
