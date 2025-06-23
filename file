@@ -3,7 +3,6 @@ import vertica_python
 import os
 import pandas as pd
 from dotenv import load_dotenv
-from datetime import datetime
 
 pd.set_option("display.max_rows", None)
 pd.set_option("display.max_columns", None)
@@ -13,7 +12,7 @@ pd.set_option("display.max_colwidth", None)
 load_dotenv()
 
 def connect_to_snowflake():
-    return snowflake.connector.connect(
+    conn = snowflake.connector.connect(
         account=os.getenv("URL_SF").split("//")[-1].split(".snowflakecomputing.com")[0],
         user=os.getenv("USER_SDL_SF"),
         private_key_file=os.path.join(os.getenv("DATA_ROOT"), os.getenv("KEYTAB_FILE_SDL_SF")),
@@ -24,6 +23,7 @@ def connect_to_snowflake():
         role=os.getenv("ROLE_SDL_SF"),
         authenticator='SNOWFLAKE_JWT'
     )
+    return conn
 
 def connect_to_vertica():
     return vertica_python.connect(
@@ -35,68 +35,77 @@ def connect_to_vertica():
         autocommit=True
     )
 
-def get_table_list(conn, query):
+def get_snowflake_tables(conn, schema_name):
+    with conn.cursor() as cursor:
+        cursor.execute(f"""
+            SELECT TABLE_NAME 
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_SCHEMA = '{schema_name}'
+        """)
+        return [row[0] for row in cursor.fetchall()]
+
+def get_vertica_tables(conn, schema_name):
     cursor = conn.cursor()
-    cursor.execute(query)
+    cursor.execute(f"""
+        SELECT table_name
+        FROM v_catalog.tables
+        WHERE table_schema = '{schema_name}' 
+    """)
     tables = [row[0] for row in cursor.fetchall()]
     cursor.close()
     return tables
 
-def get_columns(conn, query):
+def get_snowflake_columns(conn, table_name, schema_name):
+    with conn.cursor() as cursor:
+        cursor.execute(f"""
+            SELECT COLUMN_NAME       
+            FROM INFORMATION_SCHEMA.COLUMNS      
+            WHERE TABLE_NAME = '{table_name}'      
+            AND TABLE_SCHEMA = '{schema_name}'      
+        """)
+        return [row[0] for row in cursor.fetchall()]
+
+def get_vertica_columns(conn, table_name, schema_name):
     cursor = conn.cursor()
-    cursor.execute(query)
+    cursor.execute(f"""
+        SELECT column_name
+        FROM v_catalog.columns
+        WHERE table_schema = '{schema_name}' AND table_name = '{table_name.lower()}'
+    """)
     columns = [row[0] for row in cursor.fetchall()]
     cursor.close()
     return columns
-
-def get_missing_columns(sf_cols, vt_cols):
-    sf_set = set([c.lower() for c in sf_cols])
-    vt_set = set([c.lower() for c in vt_cols])
-    return sorted(list(sf_set - vt_set))
 
 def main():
     schema_name = "ER1"
     sf_conn = connect_to_snowflake()
     vt_conn = connect_to_vertica()
 
+    result_rows = []
+
     try:
-        # Get all table names
-        sf_tables = get_table_list(sf_conn, f"SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{schema_name}'")
-        vt_tables = get_table_list(vt_conn, f"SELECT table_name FROM v_catalog.tables WHERE table_schema = '{schema_name}'")
-        vt_table_lookup = {t.lower(): t for t in vt_tables}
-        common_tables = [t for t in sf_tables if t.lower() in vt_table_lookup]
+        sf_tables = get_snowflake_tables(sf_conn, schema_name)
+        vt_tables = get_vertica_tables(vt_conn, schema_name)
 
-        all_rows = []
+        common_tables = set(map(str.lower, sf_tables)).intersection(set(map(str.lower, vt_tables)))
 
-        for table in common_tables:
-            # Get column lists
-            sf_cols = get_columns(sf_conn, f"""
-                SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-                WHERE TABLE_NAME = '{table}' AND TABLE_SCHEMA = '{schema_name}'
-            """)
-            vt_cols = get_columns(vt_conn, f"""
-                SELECT column_name FROM v_catalog.columns
-                WHERE table_schema = '{schema_name}' AND table_name = '{table.lower()}'
-            """)
+        for table in sorted(common_tables):
+            sf_cols = get_snowflake_columns(sf_conn, table.upper(), schema_name)
+            vt_cols = get_vertica_columns(vt_conn, table, schema_name)
 
-            # Compare: Show only columns in Snowflake that are missing in Vertica
-            missing = get_missing_columns(sf_cols, vt_cols)
+            all_columns = set(map(str.lower, sf_cols)).union(set(map(str.lower, vt_cols)))
 
-            for col in missing:
-                all_rows.append({
-                    "Table Name": table,
-                    "Missing Column in Vertica": col
+            for col in all_columns:
+                result_rows.append({
+                    "Table_Name": table.upper(),
+                    "Column_Name": col,
+                    "PresentInVertica": 'Y' if col in map(str.lower, vt_cols) else 'N',
+                    "PresentInSnowflake": 'Y' if col in map(str.lower, sf_cols) else 'N',
                 })
 
-        # Write to Excel if mismatches found
-        if all_rows:
-            df = pd.DataFrame(all_rows)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-            output_file = f"{schema_name}_missing_columns_only_{timestamp}.xlsx"
-            df.to_excel(output_file, sheet_name="MissingOnly", index=False)
-            print(f"\n✅ Report saved to: {output_file}")
-        else:
-            print("\n✅ All columns in Snowflake exist in Vertica. No missing columns found.")
+        df = pd.DataFrame(result_rows)
+        df.to_excel("column_comparison_report.xlsx", index=False)
+        print("\nReport saved as column_comparison_report.xlsx")
 
     finally:
         sf_conn.close()
