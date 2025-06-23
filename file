@@ -9,11 +9,6 @@ SCHEMA = os.getenv("ER1_SCHEMA", "ER1")
 TABLE = "CLIENT_PROFILE_INFO"
 BATCH_SIZE = 10000
 
-pd.set_option("display.max_rows", None)
-pd.set_option("display.max_columns", None)
-pd.set_option("display.width", None)
-pd.set_option("display.max_colwidth", None)
-
 def normalize(name: str) -> str:
     return name.casefold()
 
@@ -68,16 +63,13 @@ def get_vertica_columns(conn, table, schema):
 
 def fetch_batches(conn, table, schema, cols, db="sf"):
     order_by = ", ".join(f'"{c}"' if db == "sf" else c for c in cols)
-    select_cols = ", ".join(f'"{c}"' if db == "sf" else c for c in cols)
-
+    select_cols = order_by
     if db == "sf":
         base = f'SELECT {select_cols} FROM "{schema}"."{table}"'
     else:
         base = f'SELECT {select_cols} FROM {schema}.{table}'
-
     qry = f"{base} ORDER BY {order_by} LIMIT %s OFFSET %s"
     offset = 0
-
     while True:
         cur = conn.cursor()
         cur.execute(qry, (BATCH_SIZE, offset))
@@ -94,28 +86,21 @@ def format_value(val):
 def compare_client_profile():
     sf_conn = connect_to_snowflake()
     vt_conn = connect_to_vertica()
+    mismatch_records = []
     try:
         sf_cols = get_snowflake_columns(sf_conn, TABLE, SCHEMA)
         vt_cols = get_vertica_columns(vt_conn, TABLE, SCHEMA)
 
-        only_sf_c, only_vt_c, common_cols = compare_sets(
+        only_sf, only_vt, common = compare_sets(
             [c.lower() for c in sf_cols],
             [c.lower() for c in vt_cols]
         )
+        if only_sf or only_vt:
+            raise ValueError(f"Schema mismatch. Snowflake only: {only_sf}, Vertica only: {only_vt}")
 
-        if only_sf_c or only_vt_c:
-            print("❌ Column mismatch found.")
-            print("Only in Snowflake:", only_sf_c)
-            print("Only in Vertica:", only_vt_c)
-            return
-
-        common = [c for c in sf_cols if c.lower() in common_cols]
-
-        sf_batches = fetch_batches(sf_conn, TABLE, SCHEMA, common, db="sf")
-        vt_batches = fetch_batches(vt_conn, TABLE, SCHEMA, common, db="vt")
-
-        mismatch_records = []
-        batch_num = 0
+        common_cols = [c for c in sf_cols if c.lower() in common]
+        sf_batches = fetch_batches(sf_conn, TABLE, SCHEMA, common_cols, db="sf")
+        vt_batches = fetch_batches(vt_conn, TABLE, SCHEMA, common_cols, db="vt")
 
         while True:
             try:
@@ -125,54 +110,45 @@ def compare_client_profile():
                 break
 
             min_len = min(len(sf_df), len(vt_df))
-
-            for idx in range(min_len):
-                for col in common:
-                    sf_val = sf_df.at[idx, col]
-                    vt_val = vt_df.at[idx, col]
-                    sf_na = pd.isna(sf_val)
-                    vt_na = pd.isna(vt_val)
-
-                    if (sf_na and not vt_na) or (not sf_na and vt_na) or (not sf_na and not vt_na and sf_val != vt_val):
+            for i in range(min_len):
+                for col in common_cols:
+                    sf_val = sf_df.at[i, col]
+                    vt_val = vt_df.at[i, col]
+                    if (pd.isna(sf_val) and not pd.isna(vt_val)) or (not pd.isna(sf_val) and pd.isna(vt_val)) or (not pd.isna(sf_val) and not pd.isna(vt_val) and sf_val != vt_val):
                         mismatch_records.append({
-                            "TableName": TABLE,
-                            "ColumnName": col,
-                            "MismatchedValueInVertica": format_value(vt_val),
-                            "MismatchedValueInSnowflake": format_value(sf_val)
+                            "tablename": TABLE,
+                            "columnname": col,
+                            "valuevertica": format_value(vt_val),
+                            "valuesnowflake": format_value(sf_val)
                         })
 
-            for idx in range(min_len, len(sf_df)):
-                row_data = sf_df.loc[idx].to_dict()
-                for col in common:
+            for i in range(min_len, len(sf_df)):
+                row = sf_df.loc[i]
+                for col in common_cols:
                     mismatch_records.append({
-                        "TableName": TABLE,
-                        "ColumnName": col,
-                        "MismatchedValueInVertica": "N/A",
-                        "MismatchedValueInSnowflake": f"EXTRA_ROW: {format_value(row_data.get(col))}"
+                        "tablename": TABLE,
+                        "columnname": col,
+                        "valuevertica": "N/A",
+                        "valuesnowflake": f"EXTRA_ROW: {format_value(row[col])}"
                     })
 
-            for idx in range(min_len, len(vt_df)):
-                row_data = vt_df.loc[idx].to_dict()
-                for col in common:
+            for i in range(min_len, len(vt_df)):
+                row = vt_df.loc[i]
+                for col in common_cols:
                     mismatch_records.append({
-                        "TableName": TABLE,
-                        "ColumnName": col,
-                        "MismatchedValueInVertica": f"EXTRA_ROW: {format_value(row_data.get(col))}",
-                        "MismatchedValueInSnowflake": "N/A"
+                        "tablename": TABLE,
+                        "columnname": col,
+                        "valuevertica": f"EXTRA_ROW: {format_value(row[col])}",
+                        "valuesnowflake": "N/A"
                     })
-
-            batch_num += 1
-
-        if mismatch_records:
-            mismatch_df = pd.DataFrame(mismatch_records)
-            print("\n=== FINAL MISMATCH REPORT ===")
-            print(mismatch_df.to_string(index=False))
-        else:
-            print("✅ No mismatches found.")
 
     finally:
         sf_conn.close()
         vt_conn.close()
+
+    if mismatch_records:
+        df = pd.DataFrame(mismatch_records)
+        df.to_excel("mismatch_report.xlsx", index=False)
 
 if __name__ == "__main__":
     compare_client_profile()
