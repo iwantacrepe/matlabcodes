@@ -1,26 +1,16 @@
 import os
-import sys
 import pandas as pd
 import snowflake.connector
 import vertica_python
 from dotenv import load_dotenv
 
-#–– Configuration ––#
+#–– Load environment ––#
 load_dotenv()
-SCHEMA = os.getenv("ER1_SCHEMA", "ER1")  # or set in your .env as ER1_SCHEMA
+SCHEMA = os.getenv("ER1_SCHEMA", "ER1")
 
-#–– Helpers ––#
 def normalize(name: str) -> str:
-    """Normalize identifiers for case-insensitive comparison."""
     return name.casefold()
 
-def compare_sets(a, b):
-    """Return only_in_a, only_in_b, and common (all normalized)."""
-    set_a = set(a)
-    set_b = set(b)
-    return sorted(set_a - set_b), sorted(set_b - set_a), sorted(set_a & set_b)
-
-#–– Connection Functions ––#
 def connect_to_snowflake():
     print("Connecting to Snowflake…")
     conn = snowflake.connector.connect(
@@ -50,7 +40,6 @@ def connect_to_vertica():
     print("Vertica connected.")
     return conn
 
-#–– Retrieval Functions ––#
 def get_snowflake_tables(conn, schema_name):
     with conn.cursor() as cur:
         cur.execute(f"""
@@ -83,7 +72,6 @@ def get_snowflake_columns(conn, table_name, schema_name):
 
 def get_vertica_columns(conn, table_name, schema_name):
     cur = conn.cursor()
-    # Match table name case-insensitively in Vertica
     cur.execute(f"""
         SELECT column_name
         FROM v_catalog.columns
@@ -94,70 +82,47 @@ def get_vertica_columns(conn, table_name, schema_name):
     cur.close()
     return cols
 
-#–– Main Comparison Logic ––#
 def main():
     sf_conn = connect_to_snowflake()
     vt_conn = connect_to_vertica()
 
     try:
-        # Fetch table lists
         sf_tables = get_snowflake_tables(sf_conn, SCHEMA)
         vt_tables = get_vertica_tables(vt_conn, SCHEMA)
 
-        # Normalize for comparison
+        # Normalize
         sf_norm = [normalize(t) for t in sf_tables]
         vt_norm = [normalize(t) for t in vt_tables]
+        common_tables = sorted(set(sf_norm).intersection(set(vt_norm)))
 
-        # Compare tables
-        only_sf, only_vt, common = compare_sets(sf_norm, vt_norm)
-
-        print("\n=== TABLE COMPARISON ===")
-        print(f"Snowflake ({len(sf_tables)}): {', '.join(sf_tables)}")
-        print(f"Vertica   ({len(vt_tables)}): {', '.join(vt_tables)}")
-        print(f"Only in Snowflake ({len(only_sf)}): {only_sf}")
-        print(f"Only in Vertica   ({len(only_vt)}): {only_vt}")
-        print(f"In both ({len(common)}): {common}")
-
-        # Column-level comparisons for each common table
-        column_results = []
-        for norm_name in common:
-            # find original-cased table names
-            sf_table = next(t for t in sf_tables if normalize(t) == norm_name)
-            vt_table = next(t for t in vt_tables if normalize(t) == norm_name)
+        results = []
+        for norm_table in common_tables:
+            sf_table = next(t for t in sf_tables if normalize(t) == norm_table)
+            vt_table = next(t for t in vt_tables if normalize(t) == norm_table)
 
             sf_cols = get_snowflake_columns(sf_conn, sf_table, SCHEMA)
             vt_cols = get_vertica_columns(vt_conn, vt_table, SCHEMA)
 
-            sf_norm_cols = [normalize(c) for c in sf_cols]
-            vt_norm_cols = [normalize(c) for c in vt_cols]
+            sf_col_map = {normalize(col): col for col in sf_cols}
+            vt_col_map = {normalize(col): col for col in vt_cols}
 
-            only_sf_c, only_vt_c, common_cols = compare_sets(sf_norm_cols, vt_norm_cols)
+            all_cols = sorted(set(sf_col_map.keys()).union(set(vt_col_map.keys())))
 
-            column_results.append({
-                "table": sf_table,
-                "sf_count": len(sf_cols),
-                "vt_count": len(vt_cols),
-                "only_sf": only_sf_c,
-                "only_vt": only_vt_c,
-                "common": common_cols
-            })
+            for col_norm in all_cols:
+                results.append({
+                    "TableName": sf_table,
+                    "ColumnName": sf_col_map.get(col_norm, vt_col_map.get(col_norm)),  # pick any actual case
+                    "PresentInVertica": "Y" if col_norm in vt_col_map else "N",
+                    "PresentInSnowflake": "Y" if col_norm in sf_col_map else "N"
+                })
 
-            print(f"\n-- Columns for {sf_table} --")
-            print(f"Snowflake ({len(sf_cols)}): {sf_cols}")
-            print(f"Vertica   ({len(vt_cols)}): {vt_cols}")
-            print(f"Only in SF: {only_sf_c}")
-            print(f"Only in VT: {only_vt_c}")
+        final_df = pd.DataFrame(results)
+        print("\n=== COLUMN PRESENCE COMPARISON ===")
+        print(final_df.to_string(index=False))
 
-        # Optionally: summarize across tables in a DataFrame
-        df = pd.DataFrame([{
-            "Table": r["table"],
-            "SF cols": r["sf_count"],
-            "VT cols": r["vt_count"],
-            "# Only SF": len(r["only_sf"]),
-            "# Only VT": len(r["only_vt"])
-        } for r in column_results])
-        print("\n=== SUMMARY ACROSS TABLES ===")
-        print(df.to_string(index=False))
+        # Optional: Save to CSV or Excel
+        # final_df.to_csv("column_comparison_output.csv", index=False)
+        # final_df.to_excel("column_comparison_output.xlsx", index=False)
 
     finally:
         sf_conn.close()
