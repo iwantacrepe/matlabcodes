@@ -1,22 +1,134 @@
-def compare_column_names(sf_columns, vertica_columns):
-    # Create dicts for original case mapping
-    sf_map = {col.lower(): col for col in sf_columns}
-    vt_map = {col.lower(): col for col in vertica_columns}
+import snowflake.connector
+import vertica_python
+import os
+import pandas as pd
+from dotenv import load_dotenv
 
-    sf_set = set(sf_map.keys())
-    vertica_set = set(vt_map.keys())
+# Display settings for pandas
+pd.set_option("display.max_rows", None)
+pd.set_option("display.max_columns", None)
+pd.set_option("display.width", None)
+pd.set_option("display.max_colwidth", None)
 
-    only_in_sf_keys = sf_set - vertica_set
-    only_in_vertica_keys = vertica_set - sf_set
-    common_keys = sf_set & vertica_set
+# Load environment variables
+load_dotenv()
 
-    return {
-        'snowflake_columns': [sf_map[k] for k in sf_set],
-        'vertica_columns': [vt_map[k] for k in vertica_set],
-        'only_in_snowflake': [sf_map[k] for k in only_in_sf_keys],
-        'only_in_vertica': [vt_map[k] for k in only_in_vertica_keys],
-        'common_columns': [sf_map[k] for k in common_keys],
-        'match_count': len(common_keys),
-        'mismatch_count': len(only_in_sf_keys) + len(only_in_vertica_keys),
-        'all_columns_match': len(only_in_sf_keys) == 0 and len(only_in_vertica_keys) == 0
-    }
+def connect_to_snowflake():
+    return snowflake.connector.connect(
+        account=os.getenv("URL_SF").split("//")[-1].split(".snowflakecomputing.com")[0],
+        user=os.getenv("USER_SDL_SF"),
+        private_key_file=os.path.join(os.getenv("DATA_ROOT"), os.getenv("KEYTAB_FILE_SDL_SF")),
+        private_key_file_pwd=os.getenv("PASSWORD_SDL_SF"),
+        database=os.getenv("DB_SDL_SF"),
+        schema=os.getenv("SCHEMA_SDL_SF"),
+        warehouse=os.getenv("WAREHOUSE_SDL_SF"),
+        role=os.getenv("ROLE_SDL_SF"),
+        authenticator='SNOWFLAKE_JWT'
+    )
+
+def connect_to_vertica():
+    return vertica_python.connect(
+        host=os.getenv("VERTICA_HOST"),
+        port=5433,
+        user=os.getenv("VERTICA_USER"),
+        password=os.getenv("VERTICA_PASSWORD"),
+        database=os.getenv("VERTICA_DB"),
+        autocommit=True
+    )
+
+def get_snowflake_tables(conn, schema_name):
+    with conn.cursor() as cursor:
+        cursor.execute(f"""
+            SELECT TABLE_NAME
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_SCHEMA = '{schema_name}'
+        """)
+        return [row[0] for row in cursor.fetchall()]
+
+def get_vertica_tables(conn, schema_name):
+    cursor = conn.cursor()
+    cursor.execute(f"""
+        SELECT table_name
+        FROM v_catalog.tables
+        WHERE table_schema = '{schema_name}'
+    """)
+    tables = [row[0] for row in cursor.fetchall()]
+    cursor.close()
+    return tables
+
+def get_snowflake_columns(conn, table_name, schema_name):
+    with conn.cursor() as cursor:
+        cursor.execute(f"""
+            SELECT COLUMN_NAME
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = '{table_name}' AND TABLE_SCHEMA = '{schema_name}'
+        """)
+        return [row[0] for row in cursor.fetchall()]
+
+def get_vertica_columns(conn, table_name, schema_name):
+    cursor = conn.cursor()
+    cursor.execute(f"""
+        SELECT column_name
+        FROM v_catalog.columns
+        WHERE table_schema = '{schema_name}' AND table_name = '{table_name.lower()}'
+    """)
+    columns = [row[0] for row in cursor.fetchall()]
+    cursor.close()
+    return columns
+
+def main():
+    schema_name = "ER1"
+    sf_conn = connect_to_snowflake()
+    vt_conn = connect_to_vertica()
+
+    result_rows = []
+
+    try:
+        # Fetch tables
+        sf_tables = get_snowflake_tables(sf_conn, schema_name)
+        vt_tables = get_vertica_tables(vt_conn, schema_name)
+
+        # Map lowercase table names to original casing
+        sf_table_map = {tbl.lower(): tbl for tbl in sf_tables}
+        vt_table_map = {tbl.lower(): tbl for tbl in vt_tables}
+
+        # Find common tables
+        common_tables = set(sf_table_map.keys()).intersection(vt_table_map.keys())
+
+        for table_lower in sorted(common_tables):
+            sf_table = sf_table_map[table_lower]
+            vt_table = vt_table_map[table_lower]
+
+            # Get column lists
+            sf_cols = get_snowflake_columns(sf_conn, sf_table, schema_name)
+            vt_cols = get_vertica_columns(vt_conn, vt_table, schema_name)
+
+            # Create mapping for original case
+            sf_col_map = {col.lower(): col for col in sf_cols}
+            vt_col_map = {col.lower(): col for col in vt_cols}
+
+            # Union of all column names (lowercase)
+            all_columns = set(sf_col_map.keys()).union(vt_col_map.keys())
+
+            for col_lower in sorted(all_columns):
+                original_col = sf_col_map.get(col_lower) or vt_col_map.get(col_lower) or col_lower
+
+                result_rows.append({
+                    "Table_Name": sf_table,
+                    "Column_Name": original_col,
+                    "PresentInVertica": 'Y' if col_lower in vt_col_map else 'N',
+                    "PresentInSnowflake": 'Y' if col_lower in sf_col_map else 'N',
+                })
+
+        # Create DataFrame and export to Excel
+        df = pd.DataFrame(result_rows)
+        df.to_excel("column_comparison_report.xlsx", index=False)
+        print("\n✅ Report saved as column_comparison_report.xlsx")
+
+    finally:
+        sf_conn.close()
+        vt_conn.close()
+        print("✅ Connections closed.")
+
+if __name__ == "__main__":
+    main()
