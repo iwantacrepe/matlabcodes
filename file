@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 SCHEMA     = os.getenv("ER1_SCHEMA", "ER1")
 TABLE      = "CLIENT_PROFILE_INFO"
-BATCH_SIZE = 10000  # adjust as needed
+BATCH_SIZE = 10000
 
 pd.set_option("display.max_rows", None)
 pd.set_option("display.max_columns", None)
@@ -23,10 +23,6 @@ def normalize(name: str) -> str:
 def compare_sets(a, b):
     sa, sb = set(a), set(b)
     return sorted(sa - sb), sorted(sb - sa), sorted(sa & sb)
-
-def generate_row_hash(row: pd.Series, cols: list) -> str:
-    vals = [(str(row[c]) if pd.notna(row[c]) else "<NULL>") for c in cols]
-    return hashlib.md5("|".join(vals).encode("utf-8")).hexdigest()
 
 #–– Connections ––#
 def connect_to_snowflake():
@@ -99,7 +95,7 @@ def fetch_batches(conn, table, schema, cols, db="sf"):
         yield pd.DataFrame(rows, columns=cols)
         offset += BATCH_SIZE
 
-#–– Comparison Logic ––#
+#–– Main Comparison ––#
 def compare_client_profile():
     sf_conn = connect_to_snowflake()
     vt_conn = connect_to_vertica()
@@ -143,15 +139,14 @@ def compare_client_profile():
 
             if len(sf_df) != len(vt_df):
                 print(f"❗ Batch {batch_num}: row count mismatch SF={len(sf_df)}, VT={len(vt_df)}")
-                # record this mismatch
                 mismatch_records.append({
                     "batch": batch_num,
                     "row_index": None,
-                    "column": None,
-                    "snowflake_value": None,
-                    "vertica_value": None,
-                    "snowflake_row": sf_df.to_dict(orient="records"),
-                    "vertica_row": vt_df.to_dict(orient="records")
+                    "column": "ROW_COUNT_MISMATCH",
+                    "snowflake_value": f"{len(sf_df)} rows",
+                    "vertica_value": f"{len(vt_df)} rows",
+                    "snowflake_row": "N/A",
+                    "vertica_row": "N/A"
                 })
                 break
 
@@ -162,6 +157,7 @@ def compare_client_profile():
                     vt_val = vt_df.at[idx, col]
                     sf_na = pd.isna(sf_val)
                     vt_na = pd.isna(vt_val)
+
                     if (sf_na and not vt_na) or (not sf_na and vt_na) or (not sf_na and not vt_na and sf_val != vt_val):
                         mismatch_records.append({
                             "batch": batch_num,
@@ -172,13 +168,18 @@ def compare_client_profile():
                             "snowflake_row": sf_df.loc[idx].to_dict(),
                             "vertica_row": vt_df.loc[idx].to_dict()
                         })
+
             batch_num += 1
 
         # build and display DataFrame of mismatches
         if mismatch_records:
             mismatch_df = pd.DataFrame(mismatch_records)
-            print("\n=== MISMATCH DETAILS ===")
-            print(mismatch_df.to_string(index=False))
+            print("\n=== MISMATCHES FOUND ===")
+            print(mismatch_df[[
+                "batch", "row_index", "column", "snowflake_value", "vertica_value"
+            ]].to_string(index=False))
+            print("\n=== FULL ROWS WITH MISMATCHES ===")
+            print(mismatch_df[["snowflake_row", "vertica_row"]].to_string(index=False))
         else:
             print("\n✅ No row-level mismatches found.")
 
