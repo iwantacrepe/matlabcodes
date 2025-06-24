@@ -1,14 +1,13 @@
 def build_outer_join_query(table, columns, keys, filter_col=None):
     select_parts = []
 
-    # Add comparison columns with correct casing
     for col in columns:
         select_parts.append(f'a."{col}" AS "{col}_sf"')
         select_parts.append(f'b."{col}" AS "{col}_vt"')
 
-    # Add COALESCE on keys using the actual column name casing
     for k in keys:
-        select_parts.append(f'COALESCE(a."{k}", b."{k}") AS "{k}"')
+        alias = k  # or lowercase it with alias = k.lower() if preferred
+        select_parts.append(f'COALESCE(a."{k}", b."{k}") AS "{alias}"')
 
     select_clause = ", ".join(select_parts)
     join_clause = " AND ".join([f'a."{k}" = b."{k}"' for k in keys])
