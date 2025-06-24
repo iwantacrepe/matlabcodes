@@ -1,154 +1,144 @@
+#!/usr/bin/env python3
 import os
+import argparse
 import pandas as pd
 import snowflake.connector
 import vertica_python
 from dotenv import load_dotenv
+from datetime import datetime
 
 load_dotenv()
 SCHEMA = os.getenv("ER1_SCHEMA", "ER1")
-TABLE = "CLIENT_PROFILE_INFO"
-BATCH_SIZE = 10000
-
-def normalize(name: str) -> str:
-    return name.casefold()
-
-def compare_sets(a, b):
-    sa, sb = set(a), set(b)
-    return sorted(sa - sb), sorted(sb - sa), sorted(sa & sb)
 
 def connect_to_snowflake():
     return snowflake.connector.connect(
-        account=os.getenv("URL_SF").split("//")[-1].split(".snowflakecomputing.com")[0],
-        user=os.getenv("USER_SDL_SF"),
-        private_key_file=os.path.join(os.getenv("DATA_ROOT"), os.getenv("KEYTAB_FILE_SDL_SF")),
-        private_key_file_pwd=os.getenv("PASSWORD_SDL_SF"),
-        database=os.getenv("DB_SDL_SF"),
-        schema=os.getenv("SCHEMA_SDL_SF"),
-        warehouse=os.getenv("WAREHOUSE_SDL_SF"),
-        role=os.getenv("ROLE_SDL_SF"),
+        account   = os.getenv("URL_SF").split("//")[-1].split(".snowflakecomputing.com")[0],
+        user      = os.getenv("USER_SDL_SF"),
+        private_key_file     = os.path.join(os.getenv("DATA_ROOT"), os.getenv("KEYTAB_FILE_SDL_SF")),
+        private_key_file_pwd = os.getenv("PASSWORD_SDL_SF"),
+        database  = os.getenv("DB_SDL_SF"),
+        schema    = os.getenv("SCHEMA_SDL_SF"),
+        warehouse = os.getenv("WAREHOUSE_SDL_SF"),
+        role      = os.getenv("ROLE_SDL_SF"),
         authenticator="SNOWFLAKE_JWT"
     )
 
 def connect_to_vertica():
     return vertica_python.connect(
-        host=os.getenv("VERTICA_HOST"),
-        port=int(os.getenv("VERTICA_PORT", 5433)),
-        user=os.getenv("VERTICA_USER"),
-        password=os.getenv("VERTICA_PASSWORD"),
-        database=os.getenv("VERTICA_DB"),
+        host      = os.getenv("VERTICA_HOST"),
+        port      = int(os.getenv("VERTICA_PORT", 5433)),
+        user      = os.getenv("VERTICA_USER"),
+        password  = os.getenv("VERTICA_PASSWORD"),
+        database  = os.getenv("VERTICA_DB"),
         autocommit=True
     )
 
-def get_snowflake_columns(conn, table, schema):
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT column_name
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE table_schema = %s AND table_name = %s
-            ORDER BY ordinal_position
-        """, (schema, table))
-        return [r[0] for r in cur.fetchall()]
+def format_value(v):
+    return "N/A" if pd.isna(v) else str(v)
 
-def get_vertica_columns(conn, table, schema):
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT column_name
-        FROM v_catalog.columns
-        WHERE table_schema = %s AND UPPER(table_name) = UPPER(%s)
-        ORDER BY ordinal_position
-    """, (schema, table))
-    cols = [r[0] for r in cur.fetchall()]
-    cur.close()
-    return cols
+def compare_table(table, cfg, start_date, sf_conn, vt_conn, out_records):
+    sub = cfg[cfg['Table Name']==table]
+    # skip if Stage
+    if (sub['Flag']=='Stage').any():
+        return
 
-def fetch_batches(conn, table, schema, cols, db="sf"):
-    order_by = ", ".join(f'"{c}"' if db == "sf" else c for c in cols)
-    select_cols = order_by
-    if db == "sf":
-        base = f'SELECT {select_cols} FROM "{schema}"."{table}"'
+    keys    = sub.loc[sub['Flag']=='Key',    'Column Name'].tolist()
+    excludes= sub.loc[sub['Flag']=='Exclude','Column Name'].tolist()
+    filters = sub.loc[sub['Flag']=='Filter', 'Column Name'].tolist()
+
+    if filters and not start_date:
+        raise ValueError(f"{table}: has Filter column(s) {filters} but no --start-date given")
+
+    # build queries
+    sf_q = f'SELECT * FROM "{SCHEMA}"."{table}"'
+    vt_q = f'SELECT * FROM {SCHEMA}.{table}'
+    params = []
+    if filters:
+        # assume only one filter column
+        col = filters[0]
+        sf_q += f' WHERE "{col}" >= %s'
+        vt_q += f' WHERE {col} >= %s'
+        params = [ start_date ]
+
+    # load into pandas
+    sf_df = pd.read_sql(sf_q, sf_conn, params=params)
+    vt_df = pd.read_sql(vt_q, vt_conn, params=params)
+
+    # full outer join
+    merged = sf_df.merge(vt_df, on=keys, how='outer', suffixes=('_sf','_vt'))
+
+    # compare all columns except keys and excludes
+    common_cols = [c for c in set(sf_df.columns).intersection(vt_df.columns)
+                   if c not in keys + excludes]
+    for col in common_cols:
+        a = merged[f"{col}_sf"]
+        b = merged[f"{col}_vt"]
+        mask = (
+            ( a.isna() & ~b.isna() ) |
+            ( ~a.isna() & b.isna() ) |
+            ( a.notna() & b.notna() & (a != b) )
+        )
+        mism = merged[mask]
+        for _, row in mism.iterrows():
+            # extra rows: if key columns all-NaN on one side
+            vsf = row[f"{col}_sf"]
+            vvt = row[f"{col}_vt"]
+            out_records.append({
+                "TableName":          table,
+                "KeyValues":          {k: format_value(row[k]) for k in keys},
+                "ColumnName":         col,
+                "ValueInSnowflake":   format_value(vsf),
+                "ValueInVertica":     format_value(vvt)
+            })
+
+def main():
+    p = argparse.ArgumentParser(
+        description="Compare Snowflake vs Vertica using a mapping file"
+    )
+    p.add_argument("mapping_file",
+        help="Excel or CSV with columns: Table Name, Flag, Column Name")
+    p.add_argument("--start-date", "-d",
+        help="YYYY-MM-DD start date for any Filter columns")
+    args = p.parse_args()
+
+    if args.start_date:
+        # validate
+        try:
+            start_date = datetime.strptime(args.start_date, "%Y-%m-%d").date()
+        except ValueError:
+            p.error("Invalid --start-date, must be YYYY-MM-DD")
     else:
-        base = f'SELECT {select_cols} FROM {schema}.{table}'
-    qry = f"{base} ORDER BY {order_by} LIMIT %s OFFSET %s"
-    offset = 0
-    while True:
-        cur = conn.cursor()
-        cur.execute(qry, (BATCH_SIZE, offset))
-        rows = cur.fetchall()
-        cur.close()
-        if not rows:
-            break
-        yield pd.DataFrame(rows, columns=cols)
-        offset += BATCH_SIZE
+        start_date = None
 
-def format_value(val):
-    return "N/A" if pd.isna(val) else str(val)
+    # read mapping
+    if args.mapping_file.lower().endswith(".csv"):
+        cfg = pd.read_csv(args.mapping_file)
+    else:
+        cfg = pd.read_excel(args.mapping_file)
 
-def compare_client_profile():
+    # sanity
+    expected = {'Table Name','Flag','Column Name'}
+    if not expected.issubset(set(cfg.columns)):
+        p.error(f"mapping file must have columns: {expected}")
+
+    tables = cfg['Table Name'].unique()
     sf_conn = connect_to_snowflake()
     vt_conn = connect_to_vertica()
-    mismatch_records = []
+    out = []
+
     try:
-        sf_cols = get_snowflake_columns(sf_conn, TABLE, SCHEMA)
-        vt_cols = get_vertica_columns(vt_conn, TABLE, SCHEMA)
-
-        only_sf, only_vt, common = compare_sets(
-            [c.lower() for c in sf_cols],
-            [c.lower() for c in vt_cols]
-        )
-        if only_sf or only_vt:
-            raise ValueError(f"Schema mismatch. Snowflake only: {only_sf}, Vertica only: {only_vt}")
-
-        common_cols = [c for c in sf_cols if c.lower() in common]
-        sf_batches = fetch_batches(sf_conn, TABLE, SCHEMA, common_cols, db="sf")
-        vt_batches = fetch_batches(vt_conn, TABLE, SCHEMA, common_cols, db="vt")
-
-        while True:
-            try:
-                sf_df = next(sf_batches)
-                vt_df = next(vt_batches)
-            except StopIteration:
-                break
-
-            min_len = min(len(sf_df), len(vt_df))
-            for i in range(min_len):
-                for col in common_cols:
-                    sf_val = sf_df.at[i, col]
-                    vt_val = vt_df.at[i, col]
-                    if (pd.isna(sf_val) and not pd.isna(vt_val)) or (not pd.isna(sf_val) and pd.isna(vt_val)) or (not pd.isna(sf_val) and not pd.isna(vt_val) and sf_val != vt_val):
-                        mismatch_records.append({
-                            "tablename": TABLE,
-                            "columnname": col,
-                            "valuevertica": format_value(vt_val),
-                            "valuesnowflake": format_value(sf_val)
-                        })
-
-            for i in range(min_len, len(sf_df)):
-                row = sf_df.loc[i]
-                for col in common_cols:
-                    mismatch_records.append({
-                        "tablename": TABLE,
-                        "columnname": col,
-                        "valuevertica": "N/A",
-                        "valuesnowflake": f"EXTRA_ROW: {format_value(row[col])}"
-                    })
-
-            for i in range(min_len, len(vt_df)):
-                row = vt_df.loc[i]
-                for col in common_cols:
-                    mismatch_records.append({
-                        "tablename": TABLE,
-                        "columnname": col,
-                        "valuevertica": f"EXTRA_ROW: {format_value(row[col])}",
-                        "valuesnowflake": "N/A"
-                    })
-
+        for tbl in tables:
+            compare_table(tbl, cfg, start_date, sf_conn, vt_conn, out)
     finally:
         sf_conn.close()
         vt_conn.close()
 
-    if mismatch_records:
-        df = pd.DataFrame(mismatch_records)
-        df.to_excel("mismatch_report.xlsx", index=False)
+    if out:
+        df = pd.DataFrame(out)
+        df.to_excel("comparison_report.xlsx", index=False)
+        print(f"Found {len(df)} mismatches → comparison_report.xlsx")
+    else:
+        print("No mismatches found.")
 
-if __name__ == "__main__":
-    compare_client_profile()
+if __name__=="__main__":
+    main()
