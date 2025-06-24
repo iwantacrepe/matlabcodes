@@ -1,29 +1,118 @@
-def build_outer_join_query(table, columns, keys, filter_col=None):
+import os
+import pandas as pd
+from dotenv import load_dotenv
+import snowflake.connector
+import vertica_python
+
+load_dotenv()
+SCHEMA = os.getenv("ER1_SCHEMA", "ER1")
+START_DATETIME = "2020-10-01 00:00:00"
+END_DATETIME = "2025-06-24 23:59:59"
+input_excel = "comparison_input.xlsx"
+output_excel = "comparison_result.xlsx"
+
+
+def connect_to_snowflake():
+    return snowflake.connector.connect(
+        account=os.getenv("URL_SF").split("//")[-1].split(".snowflakecomputing.com")[0],
+        user=os.getenv("USER_SDL_SF"),
+        private_key_file=os.path.join(os.getenv("DATA_ROOT"), os.getenv("KEYTAB_FILE_SDL_SF")),
+        private_key_file_pwd=os.getenv("PASSWORD_SDL_SF"),
+        database=os.getenv("DB_SDL_SF"),
+        schema=os.getenv("SCHEMA_SDL_SF"),
+        warehouse=os.getenv("WAREHOUSE_SDL_SF"),
+        role=os.getenv("ROLE_SDL_SF"),
+        authenticator="SNOWFLAKE_JWT"
+    )
+
+
+def connect_to_vertica():
+    return vertica_python.connect({
+        'host': os.getenv("HOST_VT"),
+        'port': 5433,
+        'user': os.getenv("USER_VT"),
+        'password': os.getenv("PASSWORD_VT"),
+        'database': os.getenv("DB_VT")
+    })
+
+
+def resolve_columns(cursor, table, columns):
+    cursor.execute(f'SELECT * FROM "{SCHEMA}"."{table}" LIMIT 1')
+    actual = [col[0] for col in cursor.description]
+    actual_map = {col.casefold(): col for col in actual}
+    return [actual_map.get(col.casefold(), col) for col in columns]
+
+
+def build_outer_join_query(table, columns, keys):
     select_parts = []
 
-    # Use actual column names as fetched from schema (Snowflake case-preserved)
     for col in columns:
         select_parts.append(f'a."{col}" AS "{col}_sf"')
         select_parts.append(f'b."{col}" AS "{col}_vt"')
 
-    # Always use the correct casing for keys in both COALESCE and JOIN
     for k in keys:
         select_parts.append(f'COALESCE(a."{k}", b."{k}") AS "{k}"')
 
     select_clause = ", ".join(select_parts)
     join_clause = " AND ".join([f'a."{k}" = b."{k}"' for k in keys])
 
-    base = f"""
+    query = f'''
         SELECT {select_clause}
         FROM "{SCHEMA}"."{table}" a
         FULL OUTER JOIN "{SCHEMA}"."{table}" b
         ON {join_clause}
-    """
+    '''
+    return query
 
-    if filter_col:
-        base += f'''
-            WHERE COALESCE(a."{filter_col}", b."{filter_col}")
-            BETWEEN '{START_DATETIME}' AND '{END_DATETIME}'
-        '''
-    
-    return base
+
+def compare_table(table, sf_cursor, vt_cursor, key_cols, compare_cols, output_df):
+    key_cols = resolve_columns(sf_cursor, table, key_cols)
+    compare_cols = resolve_columns(sf_cursor, table, compare_cols)
+
+    query = build_outer_join_query(table, compare_cols, key_cols)
+    print(f"[INFO] Querying table {table}...")
+    sf_cursor.execute(query)
+    df = sf_cursor.fetch_pandas_all()
+
+    mismatch_records = []
+    for idx, row in df.iterrows():
+        for col in compare_cols:
+            val_sf = row.get(f"{col}_sf")
+            val_vt = row.get(f"{col}_vt")
+            if pd.isna(val_sf) and pd.isna(val_vt):
+                continue
+            if val_sf != val_vt:
+                record = {
+                    "Table": table,
+                    "Column": col,
+                    "Snowflake Value": val_sf if pd.notna(val_sf) else "N/A",
+                    "Vertica Value": val_vt if pd.notna(val_vt) else "N/A",
+                }
+                for key in key_cols:
+                    record[key] = row.get(key)
+                mismatch_records.append(record)
+
+    return pd.concat([output_df, pd.DataFrame(mismatch_records)], ignore_index=True)
+
+
+def main():
+    sf_conn = connect_to_snowflake()
+    vt_conn = connect_to_vertica()
+    sf_cursor = sf_conn.cursor()
+    vt_cursor = vt_conn.cursor()
+
+    input_df = pd.read_excel(input_excel)
+    output_df = pd.DataFrame()
+
+    for _, row in input_df.iterrows():
+        table = row['table']
+        keys = [k.strip() for k in str(row['keys']).split(',')]
+        compare_cols = [c.strip() for c in str(row['compare_columns']).split(',')]
+        output_df = compare_table(table, sf_cursor, vt_cursor, keys, compare_cols, output_df)
+
+    output_df.to_excel(output_excel, index=False)
+    print(f"[SUCCESS] Comparison report written to {output_excel}")
+
+
+if __name__ == "__main__":
+    main()
