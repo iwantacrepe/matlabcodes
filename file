@@ -54,3 +54,40 @@ def compare_table(table, config_df, sf_conn, vt_conn, summary, output_path, firs
         summary.append(f"{table}: No mismatches")
 
     return first_write
+
+
+
+
+def main():
+    config = pd.read_excel("test.xlsx")
+    required_cols = {"Table Name", "Flag", "Column Name"}
+    if not required_cols.issubset(config.columns):
+        raise ValueError("Excel file must have columns: Table Name, Flag, Column Name")
+
+    tables = config["Table Name"].dropna().unique()
+    sf_conn = connect_to_snowflake()
+    vt_conn = connect_to_vertica()
+    summary = []
+    output_path = "comparison_report.xlsx"
+
+    # Remove old file if exists
+    if os.path.exists(output_path):
+        os.remove(output_path)
+
+    first_write = True
+
+    try:
+        for table in tables:
+            first_write = compare_table(table, config, sf_conn, vt_conn, summary, output_path, first_write)
+    finally:
+        sf_conn.close()
+        vt_conn.close()
+
+    print("\n=== Summary ===")
+    for line in summary:
+        print(line)
+
+    if os.path.exists(output_path):
+        print("\nMismatch report saved to comparison_report.xlsx")
+    else:
+        print("\nNo mismatches found.")
