@@ -1,9 +1,9 @@
+from openpyxl import load_workbook
 import os
 import pandas as pd
 import snowflake.connector
 import vertica_python
 from dotenv import load_dotenv
-from openpyxl import load_workbook
 
 pd.set_option("display.max_rows", None)
 pd.set_option("display.max_columns", None)
@@ -82,28 +82,27 @@ def compare_rows(df, compare_cols, keys, table):
         for col in compare_cols:
             val_sf = row.get(f"{col}_sf")
             val_vt = row.get(f"{col}_vt")
-            val_sf_str = format_value(val_sf).strip().casefold()
-            val_vt_str = format_value(val_vt).strip().casefold()
-            if val_sf_str != val_vt_str:
+
+            is_missing_in_vt = pd.isna(val_vt) and not pd.isna(val_sf)
+            is_missing_in_sf = pd.isna(val_sf) and not pd.isna(val_vt)
+            is_mismatch = (
+                not pd.isna(val_sf) and not pd.isna(val_vt) and
+                str(val_sf).strip().casefold() != str(val_vt).strip().casefold()
+            )
+
+            if is_missing_in_sf or is_missing_in_vt or is_mismatch:
                 mismatch = {
                     "TableName": table,
                     "ColumnName": col,
-                    "ValueInVertica": format_value(val_vt),
-                    "ValueInSnowflake": format_value(val_sf),
-                    "Key": ", ".join([format_value(row.get(f"{k}_sf") or row.get(f"{k}_vt")) for k in keys])
+                    "ValueInVertica": "N/A" if pd.isna(val_vt) else str(val_vt),
+                    "ValueInSnowflake": "N/A" if pd.isna(val_sf) else str(val_sf),
+                    "Key": ", ".join([
+                        format_value(row.get(f"{k}_sf")) if not pd.isna(row.get(f"{k}_sf"))
+                        else format_value(row.get(f"{k}_vt")) for k in keys
+                    ])
                 }
                 mismatches.append(mismatch)
     return mismatches
-
-def run_query(conn, table, columns, filter_col, dbtype):
-    col_clause = ", ".join([f'"{col}"' if dbtype == "snowflake" else col for col in columns])
-    qry = f'SELECT {col_clause} FROM "{SCHEMA}"."{table}"' if dbtype == "snowflake" \
-        else f'SELECT {col_clause} FROM {SCHEMA}.{table}'
-    if filter_col:
-        qry += f' WHERE "{filter_col}" BETWEEN \'{START_DATETIME}\' AND \'{END_DATETIME}\''
-    with conn.cursor() as cur:
-        cur.execute(qry)
-        return pd.DataFrame(cur.fetchall(), columns=[desc[0] for desc in cur.description])
 
 def compare_table(table, config_df, sf_conn, vt_conn, summary, output_path, first_write):
     sub = config_df[config_df["Table Name"].str.casefold() == table.casefold()]
@@ -122,28 +121,30 @@ def compare_table(table, config_df, sf_conn, vt_conn, summary, output_path, firs
     sf_norm_map = {col.casefold(): col for col in sf_cols}
     vt_norm_map = {col.casefold(): col for col in vt_cols}
     common_norm = set(sf_norm_map.keys()) & set(vt_norm_map.keys())
-    common_cols = [sf_norm_map[n] for n in common_norm if n in sf_norm_map and n in vt_norm_map]
+    common_cols = [sf_norm_map[n] for n in common_norm]
     all_cols = list(set(sf_cols + vt_cols))
+
     keys = resolve_columns(key_cols, all_cols, force_upper=True)
     excludes = resolve_columns(exclude_cols, all_cols, force_upper=True) if exclude_cols else []
-    filters = resolve_columns(filter_cols, all_cols, force_upper=True) if filter_cols else []
-
     compare_cols = [col for col in common_cols if col not in keys + excludes]
-    all_used_cols = list(set(keys + compare_cols + ([filter_col] if filter_col else [])))
 
-    print(f"\n[INFO] Running query for table: {table}")
-    sf_df = run_query(sf_conn, table, all_used_cols, filter_col, dbtype="snowflake")
-    vt_df = run_query(vt_conn, table, all_used_cols, filter_col, dbtype="vertica")
+    def fetch_df(conn, dbtype):
+        cols = keys + compare_cols
+        col_str = ", ".join(f'"{c}"' for c in cols)
+        query = f'SELECT {col_str} FROM "{SCHEMA}"."{table}"'
+        if filter_col:
+            query += f' WHERE "{filter_col}" BETWEEN \'{START_DATETIME}\' AND \'{END_DATETIME}\''
+        with conn.cursor() as cur:
+            cur.execute(query)
+            return pd.DataFrame(cur.fetchall(), columns=[desc[0].upper() for desc in cur.description])
 
-    sf_df = sf_df.add_suffix("_sf")
-    vt_df = vt_df.add_suffix("_vt")
+    df_sf = fetch_df(sf_conn, "snowflake").add_suffix("_sf")
+    df_vt = fetch_df(vt_conn, "vertica").add_suffix("_vt")
 
-    merged = pd.merge(
-        sf_df, vt_df,
-        left_on=[k + "_sf" for k in keys],
-        right_on=[k + "_vt" for k in keys],
-        how="outer"
-    )
+    merged = pd.merge(df_sf, df_vt,
+                      left_on=[f"{k}_sf" for k in keys],
+                      right_on=[f"{k}_vt" for k in keys],
+                      how='outer')
 
     mismatches = compare_rows(merged, compare_cols, keys, table)
 
