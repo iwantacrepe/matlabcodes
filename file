@@ -1,16 +1,16 @@
 def build_outer_join_query(table, columns, keys, filter_col=None):
     select_parts = []
 
+    # Use actual column names as fetched from schema (Snowflake case-preserved)
     for col in columns:
         select_parts.append(f'a."{col}" AS "{col}_sf"')
         select_parts.append(f'b."{col}" AS "{col}_vt"')
 
+    # Always use the correct casing for keys in both COALESCE and JOIN
     for k in keys:
-        # Preserve original casing inside COALESCE and alias using _key to avoid conflicts
         select_parts.append(f'COALESCE(a."{k}", b."{k}") AS "{k}"')
 
     select_clause = ", ".join(select_parts)
-
     join_clause = " AND ".join([f'a."{k}" = b."{k}"' for k in keys])
 
     base = f"""
@@ -25,4 +25,5 @@ def build_outer_join_query(table, columns, keys, filter_col=None):
             WHERE COALESCE(a."{filter_col}", b."{filter_col}")
             BETWEEN '{START_DATETIME}' AND '{END_DATETIME}'
         '''
+    
     return base
