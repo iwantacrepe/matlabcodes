@@ -1,16 +1,12 @@
-Here is the corrected version of the build_outer_join_query function, along with the relevant part of compare_table() to ensure correct case-sensitive handling of column names for Snowflake:
-
-
----
-
-✅ Step 1: Replace build_outer_join_query() with this:
-
 def build_outer_join_query(table, columns, keys, filter_col=None):
-    # Use original case-sensitive names in the SELECT clause
     select_parts = []
+
+    # Add comparison columns with correct casing
     for col in columns:
         select_parts.append(f'a."{col}" AS "{col}_sf"')
         select_parts.append(f'b."{col}" AS "{col}_vt"')
+
+    # Add COALESCE on keys using the actual column name casing
     for k in keys:
         select_parts.append(f'COALESCE(a."{k}", b."{k}") AS "{k}"')
 
@@ -30,50 +26,3 @@ def build_outer_join_query(table, columns, keys, filter_col=None):
             BETWEEN '{START_DATETIME}' AND '{END_DATETIME}'
         '''
     return base
-
-
----
-
-✅ Step 2: In compare_table() make sure this stays untouched:
-
-You're already resolving using original cases:
-
-all_cols = list(set(sf_cols + vt_cols))
-keys = resolve_columns(key_cols, all_cols)
-excludes = resolve_columns(exclude_cols, all_cols) if exclude_cols else []
-filters = resolve_columns(filter_cols, all_cols) if filter_cols else []
-
-And common_cols is:
-
-common_cols = [sf_norm_map[n] for n in common_norm if n in sf_norm_map and n in vt_norm_map]
-
-So then:
-
-compare_cols = [col for col in common_cols if col not in keys + excludes]
-
-Which is perfect — it uses the actual case-sensitive names returned from the DB.
-
-
----
-
-✅ Optional: Add Logging for Debugging
-
-Before running the SQL, you can log it to debug any remaining issues:
-
-print(f"\n[INFO] Running query for table: {table}")
-print(query)
-
-
----
-
-Now your query will:
-
-Use correct case-sensitive column names in SELECT and JOIN clauses.
-
-Avoid invalid identifier errors.
-
-Still keep case-insensitive matching logic during config column resolution.
-
-
-Let me know if you want to log skipped columns that exist only in Snowflake or Vertica.
-
