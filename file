@@ -103,10 +103,9 @@ def compare_rows(df, compare_cols, keys, table):
                     "TableName": table,
                     "ColumnName": col,
                     "ValueInVertica": format_value(val_vt),
-                    "ValueInSnowflake": format_value(val_sf)
+                    "ValueInSnowflake": format_value(val_sf),
+                    "Key": ", ".join([format_value(row.get(k)) for k in keys])
                 }
-                for k in keys:
-                    mismatch[k] = format_value(row.get(k))
                 mismatches.append(mismatch)
     return mismatches
 
@@ -145,7 +144,7 @@ def compare_table(table, config_df, sf_conn, vt_conn, summary, all_mismatches):
         vt_cursor.execute(query)
         vt_df = pd.DataFrame(vt_cursor.fetchall(), columns=[desc[0] for desc in vt_cursor.description])
 
-    merged = sf_df.merge(vt_df, how='outer')
+    merged = sf_df.merge(vt_df, how='outer', on=keys)
     mismatches = compare_rows(merged, compare_cols, keys, table)
     all_mismatches.extend(mismatches)
 
@@ -176,9 +175,7 @@ def main():
 
     if all_mismatches:
         df = pd.DataFrame(all_mismatches)
-        key_cols = [k for k in df.columns if k not in ["TableName", "ColumnName", "ValueInVertica", "ValueInSnowflake"]]
-        final_columns = ["TableName", "ColumnName", "ValueInVertica", "ValueInSnowflake"] + key_cols
-        df = df[final_columns]
+        df = df[["TableName", "ColumnName", "ValueInVertica", "ValueInSnowflake", "Key"]]
         df.to_excel("comparison_report.xlsx", index=False)
         print("\nMismatch report saved to comparison_report.xlsx")
     else:
