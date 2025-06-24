@@ -1,143 +1,72 @@
-Thanks for the clarification, and based on your printouts and consistent Snowflake error:
+To handle Snowflake’s case sensitivity (where unquoted identifiers are automatically converted to uppercase), and Vertica’s case-insensitive behavior, we need to make the following adjustments:
 
-> invalid identifier 'A."company_id"'
+✅ Key Requirements
 
-
-
-This clearly confirms the issue is with case-sensitive column handling in Snowflake. Specifically:
+1. Snowflake column names should be resolved to UPPERCASE, since they are case-sensitive.
 
 
----
-
-🔍 Root Cause Recap:
-
-Snowflake stores unquoted identifiers as uppercase by default, so:
-
-company_id → becomes COMPANY_ID
-
-But if you quote an identifier like "company_id" or "Company_ID", then it's case-sensitive and must match exactly.
-
-You're querying with:
-
-a."company_id"
-
-But that column in Snowflake is actually stored as:
-
-"COMPANY_ID"
-
-Hence the error.
+2. Vertica can accept lowercase or any case, so no need to change anything there.
 
 
----
-
-✅ Final Fix Strategy
-
-Let me now give you the corrected and clean implementation of your code section that ensures:
-
-1. ✅ All column names used in SQL queries are taken directly from Snowflake/Vertica schema (case preserved).
+3. When constructing the SQL query for Snowflake, all column references should be quoted and in UPPERCASE.
 
 
-2. ✅ Any Excel column (e.g., company_id, Company_ID) is casefold-matched to the real column name (e.g., COMPANY_ID).
-
-
-3. ✅ No use of any col.lower() or col.casefold() in query building anymore — only the resolved correct names are used.
+4. resolve_columns() should return column names in UPPERCASE if they will be used with Snowflake.
 
 
 
 
 ---
 
-✅ Final Working Code
+✅ Change in resolve_columns():
 
-def resolve_columns(columns_from_excel, actual_columns):
-    actual_map = {col.casefold(): col for col in actual_columns}
+Modify it to return UPPERCASE names for Snowflake:
+
+def resolve_columns(requested, actual, force_upper=False):
     resolved = []
-    for col in columns_from_excel:
-        key = col.casefold()
-        if key not in actual_map:
-            raise ValueError(f"[ERROR] Column '{col}' not found in actual schema.")
-        resolved.append(actual_map[key])
+    actual_map = {col.casefold(): col for col in actual}
+    for col in requested:
+        if col.casefold() not in actual_map:
+            raise ValueError(f"Column '{col}' not found in table")
+        resolved_name = actual_map[col.casefold()]
+        if force_upper:
+            resolved_name = resolved_name.upper()
+        resolved.append(resolved_name)
     return resolved
 
-def build_outer_join_query(table, columns, keys, filter_col=None):
-    select_parts = []
 
-    # Main column SELECTs
-    for col in columns:
-        select_parts.append(f'a."{col}" AS "{col}_sf"')
-        select_parts.append(f'b."{col}" AS "{col}_vt"')
+---
 
-    # Keys - add coalesce only once for join keys
-    for k in keys:
-        select_parts.append(f'COALESCE(a."{k}", b."{k}") AS "{k}"')
+✅ Change in compare_table():
 
-    select_clause = ", ".join(select_parts)
-    join_clause = " AND ".join([f'a."{k}" = b."{k}"' for k in keys])
+Update resolve_columns() calls to force_upper=True for Snowflake compatibility:
 
-    query = f'''
-        SELECT {select_clause}
-        FROM "{SCHEMA}"."{table}" a
-        FULL OUTER JOIN "{SCHEMA}"."{table}" b
-        ON {join_clause}
-    '''
-
-    if filter_col:
-        query += f'''
-            WHERE COALESCE(a."{filter_col}", b."{filter_col}")
-            BETWEEN '{START_DATETIME}' AND '{END_DATETIME}'
-        '''
-
-    return query
+keys = resolve_columns(key_cols, all_cols, force_upper=True)
+    excludes = resolve_columns(exclude_cols, all_cols, force_upper=True) if exclude_cols else []
+    filters = resolve_columns(filter_cols, all_cols, force_upper=True) if filter_cols else []
 
 
 ---
 
-✅ Example Usage in Your Flow
+✅ Final Adjustments in compare_table():
 
-Replace your compare_table() section like this:
+Make sure column references in build_outer_join_query() use UPPERCASE versions:
 
-actual_sf_cols = get_columns_from_snowflake(table)
-actual_vt_cols = get_columns_from_vertica(table)
-
-compare_cols = resolve_columns(config['columns_to_compare'], actual_sf_cols)
-key_cols = resolve_columns(config['keys'], actual_sf_cols)
-
-print(f"[DEBUG] Final Compare Columns: {compare_cols}")
-print(f"[DEBUG] Final Key Columns: {key_cols}")
-
-query = build_outer_join_query(table, compare_cols, key_cols, config.get('filter_column'))
-
-print(f"[INFO] Running query for table: {table}")
-print(query)
-
-sf_cursor.execute(query)
+This is already ensured since you're passing columns and keys that are now forced to uppercase.
 
 
 ---
 
-🧪 Optional: Enforce strict casing on Snowflake to simulate issues
+✅ Optional Logging (for verification):
 
-Try running this query manually in Snowflake Web UI:
+Add a debug print for all resolved columns:
 
-SELECT "company_id" FROM "ER1"."CLIENT_PROFILE_INFO"
-
-❌ This will fail unless the column was actually created in lowercase (which is rare).
-✅ This will always work:
-
-SELECT "COMPANY_ID" FROM "ER1"."CLIENT_PROFILE_INFO"
+print(f"[DEBUG] Compare columns (Snowflake UPPERCASE): {compare_cols}")
 
 
 ---
 
-✅ Summary
+With this, your Snowflake columns will always be in uppercase quoted format, avoiding errors like column not found due to case mismatch. The Vertica side doesn’t need any special case handling because it treats column names as case-insensitive by default.
 
-Step	Status
-
-Column name mismatches	🔴 Fixed
-Query case-safety	✅ Fixed
-Runtime SQL issues	✅ Resolved
-Consistency across reruns	✅ Ensured
-
-
-Let me know if you want this integrated directly into your testfile6.py.
+Let me know if you want this logic applied to the get_columns() function as well for consistency.
 
