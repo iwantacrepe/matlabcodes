@@ -5,17 +5,16 @@ import snowflake.connector
 import vertica_python
 from dotenv import load_dotenv
 
-# display settings
+# display all rows/cols in console
 pd.set_option("display.max_rows", None)
 pd.set_option("display.max_columns", None)
 pd.set_option("display.width", None)
 pd.set_option("display.max_colwidth", None)
 
 load_dotenv()
-
 SCHEMA = os.getenv("ER1_SCHEMA", "ER1")
 START_DATETIME = "2020-10-01 00:00:00"
-END_DATETIME = "2025-06-24 23:59:59"
+END_DATETIME   = "2025-06-24 23:59:59"
 
 def connect_to_snowflake():
     return snowflake.connector.connect(
@@ -47,7 +46,7 @@ def get_columns(conn, table, dbtype="snowflake"):
                 SELECT column_name
                   FROM INFORMATION_SCHEMA.COLUMNS
                  WHERE table_schema = %s
-                   AND table_name = %s
+                   AND table_name    = %s
               ORDER BY ordinal_position
             """, (SCHEMA, table))
             return [r[0] for r in cur.fetchall()]
@@ -65,28 +64,31 @@ def get_columns(conn, table, dbtype="snowflake"):
         return cols
 
 def resolve_columns(requested, actual, force_upper=False):
-    actual_map = {col.casefold(): col for col in actual}
+    """
+    Map each requested name (case-insensitive) to the actual column name.
+    If force_upper=True, return actual_name.upper().
+    """
+    actual_map = {c.casefold(): c for c in actual}
     resolved = []
-    for col in requested:
-        key = col.casefold()
+    for req in requested:
+        key = req.casefold()
         if key not in actual_map:
-            raise ValueError(f"Column '{col}' not found in table")
+            raise ValueError(f"Column '{req}' not found in actual columns")
         name = actual_map[key]
         resolved.append(name.upper() if force_upper else name)
     return resolved
 
 def fetch_table_df(conn, table, schema, cols, dbtype):
     """
-    Pulls the entire table into a DataFrame,
-    renaming cols to col_sf or col_vt.
+    Pull entire table into a DataFrame, then rename each col -> col_sf or col_vt.
     """
     if dbtype == "sf":
         select = ", ".join(f'"{c}"' for c in cols)
-        sql = f'SELECT {select} FROM "{schema}"."{table}"'
+        sql    = f'SELECT {select} FROM "{schema}"."{table}"'
         suffix = "_sf"
     else:
         select = ", ".join(cols)
-        sql = f"SELECT {select} FROM {schema}.{table}"
+        sql    = f"SELECT {select} FROM {schema}.{table}"
         suffix = "_vt"
 
     cur = conn.cursor()
@@ -104,75 +106,82 @@ def compare_rows(df, compare_cols, keys, table):
     mismatches = []
     for _, row in df.iterrows():
         for col in compare_cols:
-            sf_val = row.get(f"{col}_sf")
-            vt_val = row.get(f"{col}_vt")
-            sf_str = format_value(sf_val).strip().casefold()
-            vt_str = format_value(vt_val).strip().casefold()
-            if sf_str != vt_str:
+            sf = row.get(f"{col}_sf")
+            vt = row.get(f"{col}_vt")
+            if format_value(sf).strip().casefold() != format_value(vt).strip().casefold():
                 mismatches.append({
-                    "TableName": table,
-                    "ColumnName": col,
-                    "ValueInVertica": format_value(vt_val),
-                    "ValueInSnowflake": format_value(sf_val),
-                    "Key": ", ".join(format_value(row.get(k)) for k in keys)
+                    "TableName":         table,
+                    "ColumnName":        col,
+                    "ValueInSnowflake":  format_value(sf),
+                    "ValueInVertica":    format_value(vt),
+                    "Key":                ", ".join(format_value(row.get(k)) for k in keys)
                 })
     return mismatches
 
 def compare_table(table, config_df, sf_conn, vt_conn, summary, output_path, first_write):
     sub = config_df[config_df["Table Name"].str.casefold() == table.casefold()]
+
+    # 1) Skip entire table if any row flag == "stage"
     if (sub["Flag"].str.casefold() == "stage").any():
-        summary.append(f"{table}: Skipped (Stage flagged)")
+        summary.append(f"{table}: Skipped (stage flag)")
         return first_write
 
+    # 2) Extract flags
     key_cols     = sub[sub["Flag"].str.casefold()=="key"]["Column Name"].tolist()
     exclude_cols = sub[sub["Flag"].str.casefold()=="exclude"]["Column Name"].tolist()
-    filter_cols  = sub[sub["Flag"].str.casefold()=="filter"]["Column Name"].tolist()
-    filter_col   = filter_cols[0] if filter_cols else None
 
+    # 3) Discover columns
     sf_cols = get_columns(sf_conn, table, dbtype="snowflake")
     vt_cols = get_columns(vt_conn, table, dbtype="vertica")
+
+    # 4) Determine common columns (case-insensitive)
     sf_map = {c.casefold(): c for c in sf_cols}
     vt_map = {c.casefold(): c for c in vt_cols}
-    common_norm = set(sf_map) & set(vt_map)
-    common_cols = [sf_map[n] for n in common_norm]
+    common = set(sf_map) & set(vt_map)
+    common_cols = [sf_map[n] for n in common]
 
+    # 5) Resolve keys (uppercase for SF), excludes (original case)
     keys     = resolve_columns(key_cols,     sf_cols + vt_cols, force_upper=True)
-    excludes = resolve_columns(exclude_cols, sf_cols + vt_cols, force_upper=True) if exclude_cols else []
-    compare_cols = [c for c in common_cols if c not in keys + excludes]
+    excludes = resolve_columns(exclude_cols, sf_cols + vt_cols, force_upper=False)
+
+    # 6) Build list of columns to compare
+    compare_cols = [c for c in common_cols if c not in keys and c not in excludes]
 
     print(f"\n[INFO] Table: {table}")
-    print("  Keys:", keys)
+    print("  Keys:   ", keys)
+    print("  Exclude:", excludes)
     print("  Compare:", compare_cols)
 
-    # fetch entire tables
+    # 7) Fetch everything at once
     fetch_cols = keys + compare_cols
     sf_df = fetch_table_df(sf_conn, table, SCHEMA, fetch_cols, dbtype="sf")
     vt_df = fetch_table_df(vt_conn, table, SCHEMA, fetch_cols, dbtype="vt")
 
-    # merge
+    # 8) Merge on keys
     left_on  = [k + "_sf" for k in keys]
     right_on = [k + "_vt" for k in keys]
     merged = pd.merge(sf_df, vt_df, how="outer", left_on=left_on, right_on=right_on)
 
-    # unify key columns
+    # 9) Rebuild key columns for reporting
     for k in keys:
         merged[k] = merged[f"{k}_sf"].fillna(merged[f"{k}_vt"])
 
-    # compare
+    # 10) Compare row-by-row
     mismatches = compare_rows(merged, compare_cols, keys, table)
 
+    # 11) Write out if any
     if mismatches:
-        dfm = pd.DataFrame(mismatches)[["TableName","ColumnName","ValueInVertica","ValueInSnowflake","Key"]]
+        dm = pd.DataFrame(mismatches)[["TableName","ColumnName","ValueInSnowflake","ValueInVertica","Key"]]
         if first_write:
-            dfm.to_excel(output_path, index=False, engine="openpyxl")
+            dm.to_excel(output_path, index=False, engine="openpyxl")
             first_write = False
         else:
             book = load_workbook(output_path)
-            with pd.ExcelWriter(output_path, engine="openpyxl", mode="a", if_sheet_exists="overlay") as writer:
-                writer.book   = book
-                writer.sheets = {ws.title: ws for ws in book.worksheets}
-                start = writer.sheets["Sheet1"].max_row
-                dfm.to_excel(writer, index=False, header=False, startrow=start)
+            with pd.ExcelWriter(output_path, engine="openpyxl", mode="a", if_sheet_exists="overlay") as w:
+                w.book   = book
+                w.sheets = {ws.title: ws for ws in book.worksheets}
+                start = w.sheets["Sheet1"].max_row
+                dm.to_excel(w, index=False, header=False, startrow=start)
         summary.append(f"{table}: {len(mismatches)} mismatches")
     else:
         summary.append(f"{table}: No mismatches")
@@ -183,7 +192,7 @@ def main():
     config = pd.read_excel("test.xlsx")
     required = {"Table Name", "Flag", "Column Name"}
     if not required.issubset(config.columns):
-        raise ValueError("Excel file must have columns: Table Name, Flag, Column Name")
+        raise ValueError("Excel must have: Table Name, Flag, Column Name")
 
     tables      = config["Table Name"].dropna().unique()
     sf_conn     = connect_to_snowflake()
@@ -203,13 +212,8 @@ def main():
         vt_conn.close()
 
     print("\n=== Summary ===")
-    for line in summary:
-        print(line)
-
-    if os.path.exists(output_path):
-        print(f"\nReport saved to {output_path}")
-    else:
-        print("\nNo mismatches found.")
+    print("\n".join(summary))
+    print("\nReport:", output_path if os.path.exists(output_path) else "No mismatches found")
 
 if __name__ == "__main__":
     main()
