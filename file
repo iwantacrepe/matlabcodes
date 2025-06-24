@@ -6,10 +6,11 @@ def build_outer_join_query(table, columns, keys, filter_col=None):
         select_parts.append(f'b."{col}" AS "{col}_vt"')
 
     for k in keys:
-        alias = k  # or lowercase it with alias = k.lower() if preferred
-        select_parts.append(f'COALESCE(a."{k}", b."{k}") AS "{alias}"')
+        # Preserve original casing inside COALESCE and alias using _key to avoid conflicts
+        select_parts.append(f'COALESCE(a."{k}", b."{k}") AS "{k}"')
 
     select_clause = ", ".join(select_parts)
+
     join_clause = " AND ".join([f'a."{k}" = b."{k}"' for k in keys])
 
     base = f"""
