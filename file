@@ -1,93 +1,79 @@
-def compare_table(table, config_df, sf_conn, vt_conn, summary, output_path, first_write):
-    sub = config_df[config_df["Table Name"].str.casefold() == table.casefold()]
-    if (sub["Flag"].str.casefold() == "stage").any():
-        summary.append(f"{table}: Skipped (Stage flagged)")
-        return first_write
-
-    key_cols = sub[sub["Flag"].str.casefold() == "key"]["Column Name"].tolist()
-    exclude_cols = sub[sub["Flag"].str.casefold() == "exclude"]["Column Name"].tolist()
-    filter_cols = sub[sub["Flag"].str.casefold() == "filter"]["Column Name"].tolist()
-    filter_col = filter_cols[0] if filter_cols else None
-
-    sf_cols = get_columns(sf_conn, table, dbtype="snowflake")
-    vt_cols = get_columns(vt_conn, table, dbtype="vertica")
-
-    sf_norm_map = {col.casefold(): col for col in sf_cols}
-    vt_norm_map = {col.casefold(): col for col in vt_cols}
-    common_norm = set(sf_norm_map.keys()) & set(vt_norm_map.keys())
-    common_cols = [sf_norm_map[n] for n in common_norm if n in sf_norm_map and n in vt_norm_map]
-
-    keys = resolve_columns(key_cols, common_cols)
-    excludes = resolve_columns(exclude_cols, common_cols) if exclude_cols else []
-    filters = resolve_columns(filter_cols, common_cols) if filter_cols else []
-
-    compare_cols = [col for col in common_cols if col not in keys + excludes]
-
-    query = build_outer_join_query(table, compare_cols, keys, filter_col=filter_col)
-
-    with sf_conn.cursor() as sf_cursor:
-        sf_cursor.execute(query)
-        sf_df = pd.DataFrame(sf_cursor.fetchall(), columns=[desc[0] for desc in sf_cursor.description])
-
-    with vt_conn.cursor() as vt_cursor:
-        vt_cursor.execute(query)
-        vt_df = pd.DataFrame(vt_cursor.fetchall(), columns=[desc[0] for desc in vt_cursor.description])
-
-    merged = sf_df.merge(vt_df, how='outer', on=keys)
-    mismatches = compare_rows(merged, compare_cols, keys, table)
-
-    if mismatches:
-        df = pd.DataFrame(mismatches)
-        df = df[["TableName", "ColumnName", "ValueInVertica", "ValueInSnowflake", "Key"]]
-        if first_write:
-            df.to_excel(output_path, index=False, engine='openpyxl')
-            first_write = False
-        else:
-            book = load_workbook(output_path)
-            with pd.ExcelWriter(output_path, engine='openpyxl', mode='a', if_sheet_exists='overlay') as writer:
-                writer.book = book
-                writer.sheets = {ws.title: ws for ws in book.worksheets}
-                start_row = writer.sheets['Sheet1'].max_row
-                df.to_excel(writer, index=False, header=False, startrow=start_row)
-        summary.append(f"{table}: Mismatches found and written")
-    else:
-        summary.append(f"{table}: No mismatches")
-
-    return first_write
+Here is the corrected version of the build_outer_join_query function, along with the relevant part of compare_table() to ensure correct case-sensitive handling of column names for Snowflake:
 
 
+---
+
+✅ Step 1: Replace build_outer_join_query() with this:
+
+def build_outer_join_query(table, columns, keys, filter_col=None):
+    # Use original case-sensitive names in the SELECT clause
+    select_parts = []
+    for col in columns:
+        select_parts.append(f'a."{col}" AS "{col}_sf"')
+        select_parts.append(f'b."{col}" AS "{col}_vt"')
+    for k in keys:
+        select_parts.append(f'COALESCE(a."{k}", b."{k}") AS "{k}"')
+
+    select_clause = ", ".join(select_parts)
+    join_clause = " AND ".join([f'a."{k}" = b."{k}"' for k in keys])
+
+    base = f"""
+        SELECT {select_clause}
+        FROM "{SCHEMA}"."{table}" a
+        FULL OUTER JOIN "{SCHEMA}"."{table}" b
+        ON {join_clause}
+    """
+
+    if filter_col:
+        base += f'''
+            WHERE COALESCE(a."{filter_col}", b."{filter_col}")
+            BETWEEN '{START_DATETIME}' AND '{END_DATETIME}'
+        '''
+    return base
 
 
-def main():
-    config = pd.read_excel("test.xlsx")
-    required_cols = {"Table Name", "Flag", "Column Name"}
-    if not required_cols.issubset(config.columns):
-        raise ValueError("Excel file must have columns: Table Name, Flag, Column Name")
+---
 
-    tables = config["Table Name"].dropna().unique()
-    sf_conn = connect_to_snowflake()
-    vt_conn = connect_to_vertica()
-    summary = []
-    output_path = "comparison_report.xlsx"
+✅ Step 2: In compare_table() make sure this stays untouched:
 
-    # Remove old file if exists
-    if os.path.exists(output_path):
-        os.remove(output_path)
+You're already resolving using original cases:
 
-    first_write = True
+all_cols = list(set(sf_cols + vt_cols))
+keys = resolve_columns(key_cols, all_cols)
+excludes = resolve_columns(exclude_cols, all_cols) if exclude_cols else []
+filters = resolve_columns(filter_cols, all_cols) if filter_cols else []
 
-    try:
-        for table in tables:
-            first_write = compare_table(table, config, sf_conn, vt_conn, summary, output_path, first_write)
-    finally:
-        sf_conn.close()
-        vt_conn.close()
+And common_cols is:
 
-    print("\n=== Summary ===")
-    for line in summary:
-        print(line)
+common_cols = [sf_norm_map[n] for n in common_norm if n in sf_norm_map and n in vt_norm_map]
 
-    if os.path.exists(output_path):
-        print("\nMismatch report saved to comparison_report.xlsx")
-    else:
-        print("\nNo mismatches found.")
+So then:
+
+compare_cols = [col for col in common_cols if col not in keys + excludes]
+
+Which is perfect — it uses the actual case-sensitive names returned from the DB.
+
+
+---
+
+✅ Optional: Add Logging for Debugging
+
+Before running the SQL, you can log it to debug any remaining issues:
+
+print(f"\n[INFO] Running query for table: {table}")
+print(query)
+
+
+---
+
+Now your query will:
+
+Use correct case-sensitive column names in SELECT and JOIN clauses.
+
+Avoid invalid identifier errors.
+
+Still keep case-insensitive matching logic during config column resolution.
+
+
+Let me know if you want to log skipped columns that exist only in Snowflake or Vertica.
+
