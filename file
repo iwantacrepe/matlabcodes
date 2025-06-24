@@ -1,15 +1,13 @@
 import os
-import argparse
 import pandas as pd
 import snowflake.connector
 import vertica_python
 from dotenv import load_dotenv
-from datetime import datetime
 
 load_dotenv()
 SCHEMA = os.getenv("ER1_SCHEMA", "ER1")
-START_DATE = "2020-10-01"
-END_DATE = "2025-06-24"
+START_DATETIME = "2020-10-01 00:00:00"
+END_DATETIME = "2025-06-24 23:59:59"
 
 def connect_to_snowflake():
     return snowflake.connector.connect(
@@ -79,7 +77,10 @@ def build_outer_join_query(table, columns, keys, filter_col=None):
         ON {join_clause}
     """
     if filter_col:
-        base += f' WHERE COALESCE(a."{filter_col}", b."{filter_col}") BETWEEN \'{START_DATE}\' AND \'{END_DATE}\''
+        base += f'''
+            WHERE COALESCE(a."{filter_col}", b."{filter_col}")
+            BETWEEN '{START_DATETIME}' AND '{END_DATETIME}'
+        '''
     return base
 
 def format_value(val):
@@ -91,9 +92,10 @@ def compare_rows(df, columns, table):
         for col in columns:
             val_sf = row.get(f"{col}_sf")
             val_vt = row.get(f"{col}_vt")
-            if pd.isna(val_sf) and pd.isna(val_vt):
-                continue
-            if val_sf != val_vt:
+            val_sf_str = format_value(val_sf).strip().lower()
+            val_vt_str = format_value(val_vt).strip().lower()
+
+            if val_sf_str != val_vt_str:
                 mismatches.append({
                     "TableName": table,
                     "ColumnName": col,
@@ -119,8 +121,9 @@ def compare_table(table, config_df, sf_conn, vt_conn, summary, all_mismatches):
 
     keys = resolve_columns(key_cols, common_cols)
     excludes = resolve_columns(exclude_cols, common_cols) if exclude_cols else []
-    compare_cols = [col for col in common_cols if col not in keys + excludes]
     filters = resolve_columns(filter_cols, common_cols) if filter_cols else []
+
+    compare_cols = [col for col in common_cols if col not in keys + excludes]
 
     query = build_outer_join_query(table, compare_cols, keys, filter_col=filter_col)
 
@@ -134,11 +137,12 @@ def compare_table(table, config_df, sf_conn, vt_conn, summary, all_mismatches):
     summary.append(f"{table}: Compared | Keys: {keys} | Excludes: {excludes or 'None'} | Filter: {filters or 'None'}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Compare Snowflake and Vertica table data using Excel config.")
-    parser.add_argument("mapping_file", help="Path to tableinfo.xlsx")
-    args = parser.parse_args()
+    file_path = input("Enter full path to your tableinfo Excel file (e.g., /mnt/data/tableinfo.xlsx): ").strip()
+    if not os.path.exists(file_path):
+        print("File does not exist. Please check the path.")
+        return
 
-    config = pd.read_excel(args.mapping_file)
+    config = pd.read_excel(file_path)
     required_cols = {"Table Name", "Flag", "Column Name"}
     if not required_cols.issubset(config.columns):
         raise ValueError("Excel file must have columns: Table Name, Flag, Column Name")
