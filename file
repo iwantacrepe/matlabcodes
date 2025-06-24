@@ -12,103 +12,148 @@ SCHEMA = os.getenv("ER1_SCHEMA", "ER1")
 
 def connect_to_snowflake():
     return snowflake.connector.connect(
-        account   = os.getenv("URL_SF").split("//")[-1].split(".snowflakecomputing.com")[0],
-        user      = os.getenv("USER_SDL_SF"),
-        private_key_file     = os.path.join(os.getenv("DATA_ROOT"), os.getenv("KEYTAB_FILE_SDL_SF")),
-        private_key_file_pwd = os.getenv("PASSWORD_SDL_SF"),
-        database  = os.getenv("DB_SDL_SF"),
-        schema    = os.getenv("SCHEMA_SDL_SF"),
-        warehouse = os.getenv("WAREHOUSE_SDL_SF"),
-        role      = os.getenv("ROLE_SDL_SF"),
+        account=os.getenv("URL_SF").split("//")[-1].split(".snowflakecomputing.com")[0],
+        user=os.getenv("USER_SDL_SF"),
+        private_key_file=os.path.join(os.getenv("DATA_ROOT"), os.getenv("KEYTAB_FILE_SDL_SF")),
+        private_key_file_pwd=os.getenv("PASSWORD_SDL_SF"),
+        database=os.getenv("DB_SDL_SF"),
+        schema=os.getenv("SCHEMA_SDL_SF"),
+        warehouse=os.getenv("WAREHOUSE_SDL_SF"),
+        role=os.getenv("ROLE_SDL_SF"),
         authenticator="SNOWFLAKE_JWT"
     )
 
 def connect_to_vertica():
     return vertica_python.connect(
-        host      = os.getenv("VERTICA_HOST"),
-        port      = int(os.getenv("VERTICA_PORT", 5433)),
-        user      = os.getenv("VERTICA_USER"),
-        password  = os.getenv("VERTICA_PASSWORD"),
-        database  = os.getenv("VERTICA_DB"),
+        host=os.getenv("VERTICA_HOST"),
+        port=int(os.getenv("VERTICA_PORT", 5433)),
+        user=os.getenv("VERTICA_USER"),
+        password=os.getenv("VERTICA_PASSWORD"),
+        database=os.getenv("VERTICA_DB"),
         autocommit=True
     )
 
 def format_value(v):
     return "N/A" if pd.isna(v) else str(v)
 
-def compare_table(table, cfg, start_date, sf_conn, vt_conn, out_records):
-    sub = cfg[cfg['Table Name']==table]
-    # skip if Stage
-    if (sub['Flag']=='Stage').any():
+def get_snowflake_columns(conn, table):
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT column_name
+              FROM INFORMATION_SCHEMA.COLUMNS
+             WHERE table_schema = %s
+               AND table_name = %s
+             ORDER BY ordinal_position
+        """, (SCHEMA, table))
+        return [r[0] for r in cur.fetchall()]
+
+def get_vertica_columns(conn, table):
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT column_name
+          FROM v_catalog.columns
+         WHERE table_schema = %s
+           AND UPPER(table_name) = UPPER(%s)
+         ORDER BY ordinal_position
+    """, (SCHEMA, table))
+    cols = [r[0] for r in cur.fetchall()]
+    cur.close()
+    return cols
+
+def resolve_columns(provided, actual_cols):
+    """Match provided names case-insensitively to actual_cols."""
+    lookup = {c.casefold(): c for c in actual_cols}
+    resolved = []
+    for p in provided:
+        key = p.casefold()
+        if key not in lookup:
+            raise KeyError(f"Column '{p}' not found in actual columns: {actual_cols}")
+        resolved.append(lookup[key])
+    return resolved
+
+def compare_table(table, cfg, start_date, sf_conn, vt_conn, out_records, summaries):
+    sub = cfg[cfg['Table Name'].str.casefold() == table.casefold()]
+    if sub.empty:
+        summaries.append(f"{table}: no mapping rows, skipped")
         return
 
-    keys    = sub.loc[sub['Flag']=='Key',    'Column Name'].tolist()
-    excludes= sub.loc[sub['Flag']=='Exclude','Column Name'].tolist()
-    filters = sub.loc[sub['Flag']=='Filter', 'Column Name'].tolist()
+    # If any row has Stage → skip entire table
+    if (sub['Flag'].str.casefold() == 'stage').any():
+        summaries.append(f"{table}: skipped (Stage flag)")
+        return
 
-    if filters and not start_date:
-        raise ValueError(f"{table}: has Filter column(s) {filters} but no --start-date given")
+    # fetch actual column lists once
+    sf_cols = get_snowflake_columns(sf_conn, table)
+    vt_cols = get_vertica_columns(vt_conn, table)
+    # resolve provided names to actual
+    keys_prov    = sub.loc[sub['Flag'].str.casefold()=='key',     'Column Name'].tolist()
+    excl_prov    = sub.loc[sub['Flag'].str.casefold()=='exclude', 'Column Name'].tolist()
+    filt_prov    = sub.loc[sub['Flag'].str.casefold()=='filter',  'Column Name'].tolist()
 
-    # build queries
+    keys     = resolve_columns(keys_prov, sf_cols)
+    excludes = resolve_columns(excl_prov, sf_cols)
+    filters  = resolve_columns(filt_prov, sf_cols)
+
+    # record summary
+    summaries.append(
+        f"{table}: keys={keys or 'NONE'}, excludes={excludes or 'NONE'}, filters={filters or 'NONE'}"
+    )
+
+    # build base queries
     sf_q = f'SELECT * FROM "{SCHEMA}"."{table}"'
     vt_q = f'SELECT * FROM {SCHEMA}.{table}'
     params = []
     if filters:
-        # assume only one filter column
-        col = filters[0]
-        sf_q += f' WHERE "{col}" >= %s'
-        vt_q += f' WHERE {col} >= %s'
-        params = [ start_date ]
+        if not start_date:
+            raise ValueError(f"{table}: has Filter column(s) {filters} but no --start-date given")
+        # assume single filter column
+        fc = filters[0]
+        sf_q += f' WHERE "{fc}" >= %s'
+        vt_q += f' WHERE {fc} >= %s'
+        params = [start_date]
 
-    # load into pandas
+    # load data
     sf_df = pd.read_sql(sf_q, sf_conn, params=params)
     vt_df = pd.read_sql(vt_q, vt_conn, params=params)
 
-    # full outer join
+    # full outer join on keys
     merged = sf_df.merge(vt_df, on=keys, how='outer', suffixes=('_sf','_vt'))
 
-    # compare all columns except keys and excludes
-    common_cols = [c for c in set(sf_df.columns).intersection(vt_df.columns)
-                   if c not in keys + excludes]
-    for col in common_cols:
-        a = merged[f"{col}_sf"]
-        b = merged[f"{col}_vt"]
+    # compare columns except keys & excludes
+    comps = [c for c in set(sf_df.columns)&set(vt_df.columns) if c not in keys+excludes]
+    for c in comps:
+        a = merged[f"{c}_sf"]
+        b = merged[f"{c}_vt"]
         mask = (
-            ( a.isna() & ~b.isna() ) |
-            ( ~a.isna() & b.isna() ) |
-            ( a.notna() & b.notna() & (a != b) )
+            (a.isna() & ~b.isna()) |
+            (~a.isna() & b.isna()) |
+            (a.notna() & b.notna() & (a != b))
         )
-        mism = merged[mask]
-        for _, row in mism.iterrows():
-            # extra rows: if key columns all-NaN on one side
-            vsf = row[f"{col}_sf"]
-            vvt = row[f"{col}_vt"]
+        for _, row in merged[mask].iterrows():
             out_records.append({
-                "TableName":          table,
-                "KeyValues":          {k: format_value(row[k]) for k in keys},
-                "ColumnName":         col,
-                "ValueInSnowflake":   format_value(vsf),
-                "ValueInVertica":     format_value(vvt)
+                "TableName": table,
+                "KeyValues": {k: format_value(row[k]) for k in keys},
+                "ColumnName": c,
+                "ValueInSnowflake": format_value(row[f"{c}_sf"]),
+                "ValueInVertica":   format_value(row[f"{c}_vt"]),
             })
 
 def main():
     p = argparse.ArgumentParser(
-        description="Compare Snowflake vs Vertica using a mapping file"
+        description="Compare Snowflake vs Vertica with mapping file"
     )
     p.add_argument("mapping_file",
-        help="Excel or CSV with columns: Table Name, Flag, Column Name")
+                   help="Excel/CSV with columns: Table Name, Flag, Column Name")
     p.add_argument("--start-date", "-d",
-        help="YYYY-MM-DD start date for any Filter columns")
+                   help="YYYY-MM-DD start date for any Filter columns")
     args = p.parse_args()
 
+    start_date = None
     if args.start_date:
-        # validate
         try:
             start_date = datetime.strptime(args.start_date, "%Y-%m-%d").date()
         except ValueError:
-            p.error("Invalid --start-date, must be YYYY-MM-DD")
-    else:
-        start_date = None
+            p.error("Invalid --start-date; must be YYYY-MM-DD")
 
     # read mapping
     if args.mapping_file.lower().endswith(".csv"):
@@ -116,29 +161,35 @@ def main():
     else:
         cfg = pd.read_excel(args.mapping_file)
 
-    # sanity
-    expected = {'Table Name','Flag','Column Name'}
-    if not expected.issubset(set(cfg.columns)):
-        p.error(f"mapping file must have columns: {expected}")
+    required = {'Table Name','Flag','Column Name'}
+    if not required.issubset(cfg.columns):
+        p.error(f"Mapping file must contain columns: {required}")
 
-    tables = cfg['Table Name'].unique()
+    tables = cfg['Table Name'].dropna().unique()
     sf_conn = connect_to_snowflake()
     vt_conn = connect_to_vertica()
     out = []
+    summaries = []
 
     try:
         for tbl in tables:
-            compare_table(tbl, cfg, start_date, sf_conn, vt_conn, out)
+            compare_table(tbl, cfg, start_date, sf_conn, vt_conn, out, summaries)
     finally:
         sf_conn.close()
         vt_conn.close()
 
-    if out:
-        df = pd.DataFrame(out)
-        df.to_excel("comparison_report.xlsx", index=False)
-        print(f"Found {len(df)} mismatches → comparison_report.xlsx")
-    else:
-        print("No mismatches found.")
+    # print summary
+    print("\n=== SUMMARY ===")
+    for line in summaries:
+        print(line)
 
-if __name__=="__main__":
+    # write detailed report
+    if out:
+        rpt = pd.DataFrame(out)
+        rpt.to_excel("comparison_report.xlsx", index=False)
+        print(f"\nFound {len(rpt)} mismatches → comparison_report.xlsx")
+    else:
+        print("\nNo mismatches found.")
+
+if __name__ == "__main__":
     main()
