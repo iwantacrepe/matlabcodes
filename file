@@ -1,51 +1,57 @@
-def compare_rows(df, compare_cols, keys, table):
-    mismatches = []
-    for _, row in df.iterrows():
-        row_keys = ", ".join([
-            format_value(row.get(f"{k}_sf")) if not pd.isna(row.get(f"{k}_sf"))
-            else format_value(row.get(f"{k}_vt")) for k in keys
-        ])
+Yes, your updated compare_rows function correctly addresses the issue of excessive NULL rows when part of a composite key is missing by simplifying the mismatch reporting to a single line per missing key, while still handling actual data mismatches as expected.
 
-        is_entirely_missing_in_vt = all(pd.isna(row.get(f"{col}_vt")) for col in compare_cols) and any(not pd.isna(row.get(f"{col}_sf")) for col in compare_cols)
-        is_entirely_missing_in_sf = all(pd.isna(row.get(f"{col}_sf")) for col in compare_cols) and any(not pd.isna(row.get(f"{col}_vt")) for col in compare_cols)
+✅ What You’ve Done Right:
 
-        if is_entirely_missing_in_vt:
-            mismatches.append({
-                "TableName": table,
-                "ColumnName": "__KEY_MISSING__",
-                "ValueInVertica": "Missing in Vertica",
-                "ValueInSnowflake": "Present",
-                "Key": row_keys
-            })
-            continue
+1. Detects Entirely Missing Rows:
 
-        if is_entirely_missing_in_sf:
-            mismatches.append({
-                "TableName": table,
-                "ColumnName": "__KEY_MISSING__",
-                "ValueInVertica": "Present",
-                "ValueInSnowflake": "Missing in Snowflake",
-                "Key": row_keys
-            })
-            continue
+For rows with all compare columns missing in Vertica but present in Snowflake (or vice versa), you flag the entire row with "__KEY_MISSING__" and write a single concise message.
 
-        for col in compare_cols:
-            val_sf = row.get(f"{col}_sf")
-            val_vt = row.get(f"{col}_vt")
+This avoids writing one row per column with "NULL"s, saving space and improving clarity.
 
-            if pd.isna(val_sf) and pd.isna(val_vt):
-                continue
 
-            if (
-                not pd.isna(val_sf) and not pd.isna(val_vt) and
-                str(val_sf).strip().casefold() != str(val_vt).strip().casefold()
-            ):
-                mismatches.append({
-                    "TableName": table,
-                    "ColumnName": col,
-                    "ValueInVertica": str(val_vt),
-                    "ValueInSnowflake": str(val_sf),
-                    "Key": row_keys
-                })
 
-    return mismatches
+2. Actual Mismatches Still Reported Column-Wise:
+
+Your logic still loops over each compare_col and compares values individually.
+
+Only adds mismatch if values differ and neither is NA, which is correct.
+
+
+
+3. Key Representation:
+
+"Key": row_keys is consistently built using available values from either _sf or _vt, ensuring traceability.
+
+
+
+
+
+---
+
+🔍 Minor Suggestions for Enhancement:
+
+To make it even more precise and robust:
+
+1. Use strip() and casefold() uniformly in is_entirely_missing_* detection:
+
+If string values are like " " or "N/A" (inconsistent formats), you might get false negatives. Update the condition to:
+
+def is_empty(val):
+    return pd.isna(val) or str(val).strip() == ""
+
+Then:
+
+is_entirely_missing_in_vt = all(is_empty(row.get(f"{col}_vt")) for col in compare_cols) and any(not is_empty(row.get(f"{col}_sf")) for col in compare_cols)
+is_entirely_missing_in_sf = all(is_empty(row.get(f"{col}_sf")) for col in compare_cols) and any(not is_empty(row.get(f"{col}_vt")) for col in compare_cols)
+
+2. Optional: Rename "__KEY_MISSING__" → "Missing Composite Key" in ColumnName for clarity.
+
+
+---
+
+✅ Final Verdict:
+
+Your custom compare_rows() function is correct, well-designed, and ready to use. It improves readability, reduces file bloat, and helps focus on actionable mismatches without sacrificing any important information.
+
+Let me know if you'd like this integrated into your full script and output updated accordingly.
+
