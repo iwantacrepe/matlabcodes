@@ -13,7 +13,7 @@ load_dotenv()
 
 SCHEMA = os.getenv("ER1_SCHEMA", "ER1")
 START_DATETIME = "2020-10-01 00:00:00"
-END_DATETIME = "2025-06-24 23:59:59"
+END_DATETIME = "2025-06-26 23:59:59" # Updated to current date as of request
 BATCH_SIZE = 100000
 
 def connect_to_snowflake():
@@ -39,7 +39,6 @@ def connect_to_vertica():
         autocommit=True
     )
 
-# New connection function for the destination Vertica database
 def connect_to_vertica_dev():
     return vertica_python.connect(
         host=os.getenv("VERTICA_HOST_DEV"),
@@ -50,7 +49,9 @@ def connect_to_vertica_dev():
         autocommit=True
     )
 
-def get_columns(conn, table, dbtype="snowflake"):
+# The function now accepts a generic object_name (table or view)
+def get_columns(conn, object_name, dbtype="snowflake"):
+    # The information schema queries work for both tables and views
     if dbtype == "snowflake":
         with conn.cursor() as cur:
             cur.execute("""
@@ -58,7 +59,7 @@ def get_columns(conn, table, dbtype="snowflake"):
                 FROM INFORMATION_SCHEMA.COLUMNS
                 WHERE table_schema = %s AND table_name = %s
                 ORDER BY ordinal_position
-            """, (SCHEMA, table))
+            """, (SCHEMA, object_name))
             return [r[0] for r in cur.fetchall()]
     else:
         cur = conn.cursor()
@@ -67,7 +68,7 @@ def get_columns(conn, table, dbtype="snowflake"):
             FROM v_catalog.columns
             WHERE table_schema = %s AND table_name = %s
             ORDER BY ordinal_position
-        """, (SCHEMA, table.lower()))
+        """, (SCHEMA, object_name.lower()))
         cols = [r[0] for r in cur.fetchall()]
         cur.close()
         return cols
@@ -90,7 +91,8 @@ def format_value(val):
 def is_empty(val):
     return pd.isna(val) or str(val).strip() == ""
 
-def compare_rows(df, compare_cols, keys, table):
+# Renamed 'table' to 'object_name' for clarity
+def compare_rows(df, compare_cols, keys, object_name):
     mismatches = []
     for _, row in df.iterrows():
         row_keys = ", ".join([
@@ -103,7 +105,8 @@ def compare_rows(df, compare_cols, keys, table):
         
         if is_entirely_missing_in_vt:
             mismatches.append({
-                "TableName": table,
+                # Renamed "TableName" to "ObjectName" to reflect the change
+                "ObjectName": object_name,
                 "ColumnName": "__KEY_MISSING__",
                 "ValueInVertica": "Missing in Vertica",
                 "ValueInSnowflake": "Present",
@@ -113,7 +116,7 @@ def compare_rows(df, compare_cols, keys, table):
 
         if is_entirely_missing_in_sf:
             mismatches.append({
-                "TableName": table,
+                "ObjectName": object_name,
                 "ColumnName": "__KEY_MISSING__",
                 "ValueInVertica": "Present",
                 "ValueInSnowflake": "Missing in Snowflake",
@@ -133,7 +136,7 @@ def compare_rows(df, compare_cols, keys, table):
                 str(val_sf).strip().casefold() != str(val_vt).strip().casefold()
             ):
                 mismatches.append({
-                    "TableName": table,
+                    "ObjectName": object_name,
                     "ColumnName": col,
                     "ValueInVertica": format_value(val_vt),
                     "ValueInSnowflake": format_value(val_sf), 
@@ -142,11 +145,12 @@ def compare_rows(df, compare_cols, keys, table):
 
     return mismatches
 
-# Updated function signature to accept the destination database connection
-def compare_table(table, config_df, sf_conn, vt_conn, vt_dev_conn, summary):
-    sub = config_df[config_df["Table Name"].str.casefold() == table.casefold()]
+# Renamed 'table' parameter to 'object_name'
+def compare_object(object_name, config_df, sf_conn, vt_conn, vt_dev_conn, summary):
+    # Now filters based on "Object Name" from the config file
+    sub = config_df[config_df["Object Name"].str.casefold() == object_name.casefold()]
     if (sub["Flag"].str.casefold() == "stage").any():
-        summary.append(f"{table}: Skipped (Stage flagged)")
+        summary.append(f"{object_name}: Skipped (Stage flagged)")
         return
 
     key_cols = sub[sub["Flag"].str.casefold() == "key"]["Column Name"].tolist()
@@ -155,11 +159,11 @@ def compare_table(table, config_df, sf_conn, vt_conn, vt_dev_conn, summary):
     filter_col = filter_cols[0] if filter_cols else None
 
     if not key_cols:
-        summary.append(f"{table}: Skipped (No key columns defined)")
+        summary.append(f"{object_name}: Skipped (No key columns defined)")
         return
         
-    sf_cols = get_columns(sf_conn, table, dbtype="snowflake")
-    vt_cols = get_columns(vt_conn, table, dbtype="vertica")
+    sf_cols = get_columns(sf_conn, object_name, dbtype="snowflake")
+    vt_cols = get_columns(vt_conn, object_name, dbtype="vertica")
 
     sf_norm_map = {col.casefold(): col for col in sf_cols}
     vt_norm_map = {col.casefold(): col for col in vt_cols}
@@ -174,7 +178,8 @@ def compare_table(table, config_df, sf_conn, vt_conn, vt_dev_conn, summary):
     def fetch_df_batch(conn, dbtype, limit, offset):
         cols_to_fetch = keys + compare_cols
         col_str = ", ".join(f'"{c}"' for c in cols_to_fetch)
-        query = f'SELECT {col_str} FROM "{SCHEMA}"."{table}"'
+        # The SELECT statement works for both tables and views
+        query = f'SELECT {col_str} FROM "{SCHEMA}"."{object_name}"'
         if filter_col:
             query += f' WHERE "{filter_col}" BETWEEN \'{START_DATETIME}\' AND \'{END_DATETIME}\''
         order_by_str = ", ".join(f'"{k}"' for k in keys)
@@ -186,7 +191,7 @@ def compare_table(table, config_df, sf_conn, vt_conn, vt_dev_conn, summary):
             return pd.DataFrame(cur.fetchall(), columns=columns)
 
     offset = 0
-    mismatches_found_for_table = False
+    mismatches_found_for_object = False
     while True:
         df_sf = fetch_df_batch(sf_conn, "snowflake", BATCH_SIZE, offset)
         df_vt = fetch_df_batch(vt_conn, "vertica", BATCH_SIZE, offset)
@@ -202,62 +207,60 @@ def compare_table(table, config_df, sf_conn, vt_conn, vt_dev_conn, summary):
                           right_on=[f"{k}_vt" for k in keys],
                           how='outer')
 
-        mismatches = compare_rows(merged, compare_cols, keys, table)
+        mismatches = compare_rows(merged, compare_cols, keys, object_name)
 
         if mismatches:
-            mismatches_found_for_table = True
+            mismatches_found_for_object = True
             
-            # Prepare data and query for batch insert into Vertica
             data_to_insert = [
-                (m['TableName'], m['ColumnName'], m['ValueInVertica'], m['ValueInSnowflake'], m['Key'])
+                (m['ObjectName'], m['ColumnName'], m['ValueInVertica'], m['ValueInSnowflake'], m['Key'])
                 for m in mismatches
             ]
             
+            # The destination table name is still hard-coded, which is correct
             insert_query = """
                 INSERT INTO vertica_snowflake_comparison
                 (table_name, column_name, valueinvertica, valueinsnowflake, unique_key)
                 VALUES (%s, %s, %s, %s, %s)
             """
             
-            # Insert the batch of mismatches into the destination table
             with vt_dev_conn.cursor() as cur:
                 cur.executemany(insert_query, data_to_insert)
 
         offset += BATCH_SIZE
 
-    if mismatches_found_for_table:
-        summary.append(f"{table}: Mismatches found and written to database")
+    if mismatches_found_for_object:
+        summary.append(f"{object_name}: Mismatches found and written to database")
     else:
-        summary.append(f"{table}: No mismatches")
+        summary.append(f"{object_name}: No mismatches")
 
 def main():
     config = pd.read_excel("test.xlsx")
-    required_cols = {"Table Name", "Flag", "Column Name"}
+    # Updated required columns to look for "Object Name"
+    required_cols = {"Object Name", "Flag", "Column Name"}
     if not required_cols.issubset(config.columns):
-        raise ValueError("Excel file must have columns: Table Name, Flag, Column Name")
+        raise ValueError("Excel file must have columns: Object Name, Flag, Column Name")
 
-    tables = config["Table Name"].dropna().unique()
+    # Renamed variable for clarity
+    object_names = config["Object Name"].dropna().unique()
     sf_conn = connect_to_snowflake()
     vt_conn = connect_to_vertica()
-    # Establish connection to the destination Vertica database
     vt_dev_conn = connect_to_vertica_dev()
     
     summary = []
     mismatches_found_overall = False
 
     try:
-        # Optional: Clear the table before a new run
         with vt_dev_conn.cursor() as cur:
              print("Truncating destination table: vertica_snowflake_comparison")
              cur.execute("TRUNCATE TABLE vertica_snowflake_comparison")
 
-        for table in tables:
-            # Pass the new connection object to the comparison function
-            compare_table(table, config, sf_conn, vt_conn, vt_dev_conn, summary)
+        # Renamed loop variable for clarity
+        for object_name in object_names:
+            compare_object(object_name, config, sf_conn, vt_conn, vt_dev_conn, summary)
     finally:
         sf_conn.close()
         vt_conn.close()
-        # Ensure the destination connection is also closed
         vt_dev_conn.close()
 
     print("\n=== Summary ===")
