@@ -1,4 +1,3 @@
-from openpyxl import load_workbook
 import os
 import pandas as pd
 import snowflake.connector
@@ -162,7 +161,6 @@ def compare_table(table, config_df, sf_conn, vt_conn, summary, output_path, firs
     excludes = resolve_columns(exclude_cols, all_cols, force_upper=True) if exclude_cols else []
     compare_cols = [col for col in common_cols if col not in keys + excludes]
 
-    # This inner function is modified to support batching
     def fetch_df_batch(conn, dbtype, limit, offset):
         cols_to_fetch = keys + compare_cols
         col_str = ", ".join(f'"{c}"' for c in cols_to_fetch)
@@ -172,16 +170,13 @@ def compare_table(table, config_df, sf_conn, vt_conn, summary, output_path, firs
         if filter_col:
             query += f' WHERE "{filter_col}" BETWEEN \'{START_DATETIME}\' AND \'{END_DATETIME}\''
         
-        # Ordering by keys is essential for consistent batching
         order_by_str = ", ".join(f'"{k}"' for k in keys)
         query += f' ORDER BY {order_by_str}'
         
-        # Both Snowflake and Vertica support LIMIT/OFFSET for pagination
         query += f' LIMIT {limit} OFFSET {offset}'
 
         with conn.cursor() as cur:
             cur.execute(query)
-            # Fetch column names from cursor description to handle empty results correctly
             columns = [desc[0].upper() for desc in cur.description] if cur.description else [c.upper() for c in cols_to_fetch]
             return pd.DataFrame(cur.fetchall(), columns=columns)
 
@@ -191,7 +186,6 @@ def compare_table(table, config_df, sf_conn, vt_conn, summary, output_path, firs
         df_sf = fetch_df_batch(sf_conn, "snowflake", BATCH_SIZE, offset)
         df_vt = fetch_df_batch(vt_conn, "vertica", BATCH_SIZE, offset)
 
-        # If both queries return no data, we have processed all rows.
         if df_sf.empty and df_vt.empty:
             break
 
@@ -209,18 +203,15 @@ def compare_table(table, config_df, sf_conn, vt_conn, summary, output_path, firs
             mismatches_found_for_table = True
             df = pd.DataFrame(mismatches)
             df = df[["TableName", "ColumnName", "ValueInVertica", "ValueInSnowflake", "Key"]]
+            
             if first_write:
-                df.to_excel(output_path, index=False, engine='openpyxl')
-                first_write = False  # Subsequent writes will append
+                # First write: create file, add header
+                df.to_csv(output_path, index=False, mode='w')
+                first_write = False
             else:
-                book = load_workbook(output_path)
-                with pd.ExcelWriter(output_path, engine='openpyxl', mode='a') as writer:
-                    writer.book = book
-                    writer.sheets = {ws.title: ws for ws in book.worksheets}
-                    start_row = writer.sheets['Sheet1'].max_row
-                    df.to_excel(writer, index=False, header=False, startrow=start_row)
+                # Subsequent writes: append without header
+                df.to_csv(output_path, index=False, mode='a', header=False)
 
-        # Move to the next batch
         offset += BATCH_SIZE
 
     if mismatches_found_for_table:
@@ -240,7 +231,8 @@ def main():
     sf_conn = connect_to_snowflake()
     vt_conn = connect_to_vertica()
     summary = []
-    output_path = "comparison_report_prodd.xlsx"
+    # Changed output path to use .csv extension
+    output_path = "comparison_report_prodd.csv"
 
     if os.path.exists(output_path):
         os.remove(output_path)
@@ -259,7 +251,8 @@ def main():
         print(line)
 
     if os.path.exists(output_path):
-        print("\nMismatch report saved to comparison_report_prodd.xlsx")
+        # Updated print statement for CSV file
+        print(f"\nMismatch report saved to {output_path}")
     else:
         print("\nNo mismatches found.")
 
