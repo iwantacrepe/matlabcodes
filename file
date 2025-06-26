@@ -14,8 +14,6 @@ load_dotenv()
 SCHEMA = os.getenv("ER1_SCHEMA", "ER1")
 START_DATETIME = "2020-10-01 00:00:00"
 END_DATETIME = "2025-06-24 23:59:59"
-# Define a batch size for processing large tables in chunks.
-# You can adjust this value based on your system's memory.
 BATCH_SIZE = 100000
 
 def connect_to_snowflake():
@@ -38,6 +36,17 @@ def connect_to_vertica():
         user=os.getenv("VERTICA_USER"),
         password=os.getenv("VERTICA_PASSWORD"),
         database=os.getenv("VERTICA_DB"),
+        autocommit=True
+    )
+
+# New connection function for the destination Vertica database
+def connect_to_vertica_dev():
+    return vertica_python.connect(
+        host=os.getenv("VERTICA_HOST_DEV"),
+        port=int(os.getenv("VERTICA_PORT_DEV", 5433)),
+        user=os.getenv("VERTICA_USER_DEV"),
+        password=os.getenv("VERTICA_PASSWORD_DEV"),
+        database=os.getenv("VERTICA_DB_DEV"),
         autocommit=True
     )
 
@@ -133,11 +142,12 @@ def compare_rows(df, compare_cols, keys, table):
 
     return mismatches
 
-def compare_table(table, config_df, sf_conn, vt_conn, summary, output_path, first_write):
+# Updated function signature to accept the destination database connection
+def compare_table(table, config_df, sf_conn, vt_conn, vt_dev_conn, summary):
     sub = config_df[config_df["Table Name"].str.casefold() == table.casefold()]
     if (sub["Flag"].str.casefold() == "stage").any():
         summary.append(f"{table}: Skipped (Stage flagged)")
-        return first_write
+        return
 
     key_cols = sub[sub["Flag"].str.casefold() == "key"]["Column Name"].tolist()
     exclude_cols = sub[sub["Flag"].str.casefold() == "exclude"]["Column Name"].tolist()
@@ -146,7 +156,7 @@ def compare_table(table, config_df, sf_conn, vt_conn, summary, output_path, firs
 
     if not key_cols:
         summary.append(f"{table}: Skipped (No key columns defined)")
-        return first_write
+        return
         
     sf_cols = get_columns(sf_conn, table, dbtype="snowflake")
     vt_cols = get_columns(vt_conn, table, dbtype="vertica")
@@ -164,17 +174,12 @@ def compare_table(table, config_df, sf_conn, vt_conn, summary, output_path, firs
     def fetch_df_batch(conn, dbtype, limit, offset):
         cols_to_fetch = keys + compare_cols
         col_str = ", ".join(f'"{c}"' for c in cols_to_fetch)
-        
         query = f'SELECT {col_str} FROM "{SCHEMA}"."{table}"'
-        
         if filter_col:
             query += f' WHERE "{filter_col}" BETWEEN \'{START_DATETIME}\' AND \'{END_DATETIME}\''
-        
         order_by_str = ", ".join(f'"{k}"' for k in keys)
         query += f' ORDER BY {order_by_str}'
-        
         query += f' LIMIT {limit} OFFSET {offset}'
-
         with conn.cursor() as cur:
             cur.execute(query)
             columns = [desc[0].upper() for desc in cur.description] if cur.description else [c.upper() for c in cols_to_fetch]
@@ -201,25 +206,29 @@ def compare_table(table, config_df, sf_conn, vt_conn, summary, output_path, firs
 
         if mismatches:
             mismatches_found_for_table = True
-            df = pd.DataFrame(mismatches)
-            df = df[["TableName", "ColumnName", "ValueInVertica", "ValueInSnowflake", "Key"]]
             
-            if first_write:
-                # First write: create file, add header
-                df.to_csv(output_path, index=False, mode='w')
-                first_write = False
-            else:
-                # Subsequent writes: append without header
-                df.to_csv(output_path, index=False, mode='a', header=False)
+            # Prepare data and query for batch insert into Vertica
+            data_to_insert = [
+                (m['TableName'], m['ColumnName'], m['ValueInVertica'], m['ValueInSnowflake'], m['Key'])
+                for m in mismatches
+            ]
+            
+            insert_query = """
+                INSERT INTO vertica_snowflake_comparison
+                (table_name, column_name, valueinvertica, valueinsnowflake, unique_key)
+                VALUES (%s, %s, %s, %s, %s)
+            """
+            
+            # Insert the batch of mismatches into the destination table
+            with vt_dev_conn.cursor() as cur:
+                cur.executemany(insert_query, data_to_insert)
 
         offset += BATCH_SIZE
 
     if mismatches_found_for_table:
-        summary.append(f"{table}: Mismatches found and written")
+        summary.append(f"{table}: Mismatches found and written to database")
     else:
         summary.append(f"{table}: No mismatches")
-
-    return first_write
 
 def main():
     config = pd.read_excel("test.xlsx")
@@ -230,29 +239,35 @@ def main():
     tables = config["Table Name"].dropna().unique()
     sf_conn = connect_to_snowflake()
     vt_conn = connect_to_vertica()
+    # Establish connection to the destination Vertica database
+    vt_dev_conn = connect_to_vertica_dev()
+    
     summary = []
-    # Changed output path to use .csv extension
-    output_path = "comparison_report_prodd.csv"
-
-    if os.path.exists(output_path):
-        os.remove(output_path)
-
-    first_write = True
+    mismatches_found_overall = False
 
     try:
+        # Optional: Clear the table before a new run
+        with vt_dev_conn.cursor() as cur:
+             print("Truncating destination table: vertica_snowflake_comparison")
+             cur.execute("TRUNCATE TABLE vertica_snowflake_comparison")
+
         for table in tables:
-            first_write = compare_table(table, config, sf_conn, vt_conn, summary, output_path, first_write)
+            # Pass the new connection object to the comparison function
+            compare_table(table, config, sf_conn, vt_conn, vt_dev_conn, summary)
     finally:
         sf_conn.close()
         vt_conn.close()
+        # Ensure the destination connection is also closed
+        vt_dev_conn.close()
 
     print("\n=== Summary ===")
     for line in summary:
         print(line)
+        if "Mismatches found" in line:
+            mismatches_found_overall = True
 
-    if os.path.exists(output_path):
-        # Updated print statement for CSV file
-        print(f"\nMismatch report saved to {output_path}")
+    if mismatches_found_overall:
+        print("\nMismatch report saved to Vertica table: vertica_snowflake_comparison")
     else:
         print("\nNo mismatches found.")
 
