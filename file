@@ -1,197 +1,203 @@
-from openpyxl import load_workbook import os import pandas as pd import snowflake.connector import vertica_python from dotenv import load_dotenv import time import psutil import threading import statistics
+from openpyxl import load_workbook
+import os
+import pandas as pd
+import snowflake.connector
+import vertica_python
+from dotenv import load_dotenv
 
---- Configuration ---
+pd.set_option("display.max_rows", None)
+pd.set_option("display.max_columns", None)
+pd.set_option("display.width", None)
+pd.set_option("display.max_colwidth", None)
 
-load_dotenv() SCHEMA = os.getenv("ER1_SCHEMA", "ER1") START_DATETIME = "2020-10-01 00:00:00" END_DATETIME = "2025-06-24 23:59:59" CHUNK_SIZE = 10000  # number of rows per batch fetch from Snowflake OUTPUT_PATH = "comparison_report_prodd.xlsx" CONFIG_FILE = "test.xlsx"
+load_dotenv()
 
---- Utility Functions ---
+SCHEMA = os.getenv("ER1_SCHEMA", "ER1")
+START_DATETIME = "2020-10-01 00:00:00"
+END_DATETIME = "2025-06-24 23:59:59"
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", 10000))
 
-def connect_to_snowflake(): return snowflake.connector.connect( account=os.getenv("URL_SF").split("//")[-1].split(".snowflakecomputing.com")[0], user=os.getenv("USER_SDL_SF"), private_key_file=os.path.join(os.getenv("DATA_ROOT"), os.getenv("KEYTAB_FILE_SDL_SF")), private_key_file_pwd=os.getenv("PASSWORD_SDL_SF"), database=os.getenv("DB_SDL_SF"), schema=os.getenv("SCHEMA_SDL_SF"), warehouse=os.getenv("WAREHOUSE_SDL_SF"), role=os.getenv("ROLE_SDL_SF"), authenticator="SNOWFLAKE_JWT" )
-
-def connect_to_vertica(): return vertica_python.connect( host=os.getenv("VERTICA_HOST"), port=int(os.getenv("VERTICA_PORT", 5433)), user=os.getenv("VERTICA_USER"), password=os.getenv("VERTICA_PASSWORD"), database=os.getenv("VERTICA_DB"), autocommit=True )
-
-def get_columns(conn, table, dbtype="snowflake"): if dbtype == "snowflake": with conn.cursor() as cur: cur.execute( """ SELECT column_name FROM INFORMATION_SCHEMA.COLUMNS WHERE table_schema = %s AND table_name = %s ORDER BY ordinal_position """, (SCHEMA, table) ) return [r[0] for r in cur.fetchall()] else: cur = conn.cursor() cur.execute( """ SELECT column_name FROM v_catalog.columns WHERE table_schema = %s AND table_name = %s ORDER BY ordinal_position """, (SCHEMA, table.lower()) ) cols = [r[0] for r in cur.fetchall()] cur.close() return cols
-
-def resolve_columns(requested, actual, force_upper=False): resolved = [] actual_map = {col.casefold(): col for col in actual} for col in requested: key = col.casefold() if key not in actual_map: raise ValueError(f"Column '{col}' not found in table {actual}") name = actual_map[key] resolved.append(name.upper() if force_upper else name) return resolved
-
-def format_value(val): return "NULL" if pd.isna(val) else str(val)
-
-def is_empty(val): return pd.isna(val) or str(val).strip() == ""
-
-def compare_rows(df, compare_cols, keys, table): mismatches = [] for _, row in df.iterrows(): row_keys = ", ".join( format_value(row.get(f"{k}_sf")) if not is_empty(row.get(f"{k}_sf")) else format_value(row.get(f"{k}_vt")) for k in keys )
-
-# Entire row missing checks
-    missing_vt = all(is_empty(row.get(f"{c}_vt")) for c in compare_cols) and any(not is_empty(row.get(f"{c}_sf")) for c in compare_cols)
-    missing_sf = all(is_empty(row.get(f"{c}_sf")) for c in compare_cols) and any(not is_empty(row.get(f"{c}_vt")) for c in compare_cols)
-    if missing_vt:
-        mismatches.append({
-            "TableName": table,
-            "ColumnName": "__KEY_MISSING__",
-            "ValueInVertica": "Missing in Vertica",
-            "ValueInSnowflake": "Present",
-            "Key": row_keys
-        })
-        continue
-    if missing_sf:
-        mismatches.append({
-            "TableName": table,
-            "ColumnName": "__KEY_MISSING__",
-            "ValueInVertica": "Present",
-            "ValueInSnowflake": "Missing in Snowflake",
-            "Key": row_keys
-        })
-        continue
-
-    # Column-level mismatches
-    for col in compare_cols:
-        v_sf = row.get(f"{col}_sf")
-        v_vt = row.get(f"{col}_vt")
-        if (pd.isna(v_sf) ^ pd.isna(v_vt)) or (
-            not pd.isna(v_sf) and not pd.isna(v_vt) and
-            str(v_sf).strip().casefold() != str(v_vt).strip().casefold()
-        ):
-            mismatches.append({
-                "TableName": table,
-                "ColumnName": col,
-                "ValueInVertica": format_value(v_vt),
-                "ValueInSnowflake": format_value(v_sf),
-                "Key": row_keys
-            })
-return mismatches
-
---- Batch Comparison ---
-
-def compare_table(table, config_df, sf_conn, vt_conn, summary, output_path, first_write): sub = config_df[config_df["Table Name"].str.casefold() == table.casefold()] if (sub["Flag"].str.casefold() == "stage").any(): summary.append(f"{table}: Skipped (Stage flagged)") return first_write
-
-# Flags and columns
-key_cols     = sub[sub["Flag"].str.casefold() == "key"]["Column Name"].tolist()
-exclude_cols = sub[sub["Flag"].str.casefold() == "exclude"]["Column Name"].tolist()
-filter_cols  = sub[sub["Flag"].str.casefold() == "filter"]["Column Name"].tolist()
-filter_col   = filter_cols[0] if filter_cols else None
-
-# Resolve column lists
-sf_cols = get_columns(sf_conn, table, dbtype="snowflake")
-vt_cols = get_columns(vt_conn, table, dbtype="vertica")
-all_cols = sf_cols + [c for c in vt_cols if c not in sf_cols]
-
-keys         = resolve_columns(key_cols, all_cols, force_upper=True)
-excludes     = resolve_columns(exclude_cols, all_cols, force_upper=True) if exclude_cols else []
-compare_cols = [c for c in sf_cols if c in vt_cols and c not in keys + excludes]
-
-select_cols = keys + compare_cols
-col_str = ", ".join(f'"{c}"' for c in select_cols)
-
-# Prepare Excel output
-book = None
-if first_write and os.path.exists(output_path):
-    os.remove(output_path)
-
-# Snowflake cursor
-sf_cur = sf_conn.cursor()
-query = f'SELECT {col_str} FROM "{SCHEMA}"."{table}"'
-if filter_col:
-    query += f' WHERE "{filter_col}" BETWEEN \'{START_DATETIME}\' AND \'{END_DATETIME}\''
-sf_cur.execute(query)
-
-batch_idx = 0
-while True:
-    batch = sf_cur.fetchmany(CHUNK_SIZE)
-    if not batch:
-        break
-    batch_idx += 1
-
-    df_sf = pd.DataFrame(batch, columns=[d[0].upper() for d in sf_cur.description]).add_suffix("_sf")
-
-    # Build Vertica WHERE on keys
-    conds = []
-    for _, r in df_sf.iterrows():
-        parts = []
-        for k in keys:
-            v = r[f"{k}_sf"]
-            if pd.isna(v): parts.append(f'"{k}" IS NULL')
-            else:          parts.append(f'"{k}" = \'{v}\'')
-        conds.append("(" + " AND ".join(parts) + ")")
-    where_clause = " OR ".join(conds) or "1=0"
-
-    vt_cur = vt_conn.cursor()
-    vt_cur.execute(f'SELECT {col_str} FROM "{SCHEMA}"."{table}" WHERE {where_clause}')
-    df_vt = pd.DataFrame(vt_cur.fetchall(), columns=[d[0].upper() for d in vt_cur.description]).add_suffix("_vt")
-    vt_cur.close()
-
-    merged = pd.merge(
-        df_sf, df_vt,
-        left_on=[f"{k}_sf" for k in keys],
-        right_on=[f"{k}_vt" for k in keys],
-        how="outer"
+def connect_to_snowflake():
+    return snowflake.connector.connect(
+        account=os.getenv("URL_SF").split("//")[-1].split(".snowflakecomputing.com")[0],
+        user=os.getenv("USER_SDL_SF"),
+        private_key_file=os.path.join(os.getenv("DATA_ROOT"), os.getenv("KEYTAB_FILE_SDL_SF")),
+        private_key_file_pwd=os.getenv("PASSWORD_SDL_SF"),
+        database=os.getenv("DB_SDL_SF"),
+        schema=os.getenv("SCHEMA_SDL_SF"),
+        warehouse=os.getenv("WAREHOUSE_SDL_SF"),
+        role=os.getenv("ROLE_SDL_SF"),
+        authenticator="SNOWFLAKE_JWT"
     )
 
-    mism = compare_rows(merged, compare_cols, keys, table)
-    if mism:
-        out_df = pd.DataFrame(mism)[["TableName","ColumnName","ValueInVertica","ValueInSnowflake","Key"]]
-        with pd.ExcelWriter(output_path, engine="openpyxl", mode="w" if first_write else "a") as writer:
-            if book:
-                writer.book = book
-                writer.sheets = {ws.title: ws for ws in book.worksheets}
-                start = writer.sheets['Sheet1'].max_row
-            else:
-                start = 0
-            out_df.to_excel(writer, index=False, header=first_write, startrow=start)
-            first_write = False
-            book = writer.book
-    summary.append(f"{table} batch {batch_idx}: {len(df_sf)} rows, {len(mism)} mismatches")
+def connect_to_vertica():
+    return vertica_python.connect(
+        host=os.getenv("VERTICA_HOST"),
+        port=int(os.getenv("VERTICA_PORT", 5433)),
+        user=os.getenv("VERTICA_USER"),
+        password=os.getenv("VERTICA_PASSWORD"),
+        database=os.getenv("VERTICA_DB"),
+        autocommit=True
+    )
 
-sf_cur.close()
-return first_write
+def get_columns(conn, table, dbtype="snowflake"):
+    if dbtype == "snowflake":
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT column_name
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE table_schema = %s AND table_name = %s
+                ORDER BY ordinal_position
+            """, (SCHEMA, table))
+            return [r[0] for r in cur.fetchall()]
+    else:
+        cur = conn.cursor()
+        cur.execute(f"""
+            SELECT column_name
+            FROM v_catalog.columns
+            WHERE table_schema = %s AND table_name = %s
+            ORDER BY ordinal_position
+        """, (SCHEMA, table.lower()))
+        cols = [r[0] for r in cur.fetchall()]
+        cur.close()
+        return cols
 
---- Main and Monitoring ---
+def resolve_columns(requested, actual, force_upper=False):
+    actual_map = {col.casefold(): col for col in actual}
+    resolved = []
+    for col in requested:
+        key = col.casefold()
+        if key not in actual_map:
+            raise ValueError(f"Column '{col}' not found")
+        name = actual_map[key]
+        resolved.append(name.upper() if force_upper else name)
+    return resolved
 
-def main(): config = pd.read_excel(CONFIG_FILE) required = {"Table Name", "Flag", "Column Name"} if not required.issubset(config.columns): raise ValueError("Excel must contain Table Name, Flag, Column Name")
+def format_value(val):
+    return "NULL" if pd.isna(val) else str(val)
 
-tables = config["Table Name"].dropna().unique()
-sf_conn = connect_to_snowflake()
-vt_conn = connect_to_vertica()
-summary = []
-first = True
+def is_empty(val):
+    return pd.isna(val) or str(val).strip() == ""
 
-for tbl in tables:
-    first = compare_table(tbl, config, sf_conn, vt_conn, summary, OUTPUT_PATH, first)
+def compare_rows(merged_df, compare_cols, keys, table, writer, startrow):
+    """Process a merged batch DataFrame, write mismatches immediately, return next startrow."""
+    rows = []
+    for _, row in merged_df.iterrows():
+        # check for whole-row missing
+        if all(is_empty(row.get(f"{c}_vt")) for c in compare_cols) and any(not is_empty(row.get(f"{c}_sf")) for c in compare_cols):
+            rows.append({
+                "TableName": table,
+                "ColumnName": "__KEY_MISSING__",
+                "ValueInVertica": "Missing in Vertica",
+                "ValueInSnowflake": "Present",
+                "Key": ", ".join(format_value(row.get(f"{k}_sf")) for k in keys)
+            })
+            continue
+        if all(is_empty(row.get(f"{c}_sf")) for c in compare_cols) and any(not is_empty(row.get(f"{c}_vt")) for c in compare_cols):
+            rows.append({
+                "TableName": table,
+                "ColumnName": "__KEY_MISSING__",
+                "ValueInVertica": "Present",
+                "ValueInSnowflake": "Missing in Snowflake",
+                "Key": ", ".join(format_value(row.get(f"{k}_vt")) for k in keys)
+            })
+            continue
+        # column‐level mismatches
+        for col in compare_cols:
+            sf = row.get(f"{col}_sf")
+            vt = row.get(f"{col}_vt")
+            if (pd.isna(sf) != pd.isna(vt)) or (not pd.isna(sf) and not pd.isna(vt) and str(sf).strip().casefold() != str(vt).strip().casefold()):
+                rows.append({
+                    "TableName": table,
+                    "ColumnName": col,
+                    "ValueInVertica": format_value(vt),
+                    "ValueInSnowflake": format_value(sf),
+                    "Key": ", ".join(format_value(row.get(f"{k}_vt")) for k in keys)
+                })
+    if rows:
+        batch_df = pd.DataFrame(rows)
+        batch_df.to_excel(writer, index=False, header=False, startrow=startrow)
+        startrow += len(batch_df)
+    return startrow
 
-sf_conn.close()
-vt_conn.close()
+def compare_table(table, config_df, sf_conn, vt_conn, output_path):
+    # skip staging tables
+    sub = config_df[config_df["Table Name"].str.casefold() == table.casefold()]
+    if (sub["Flag"].str.casefold() == "stage").any():
+        print(f"{table}: skipped (stage flag)")
+        return
 
-print("\n=== Summary ===")
-for line in summary:
-    print(line)
-if os.path.exists(OUTPUT_PATH):
-    print(f"\nMismatch report saved to {OUTPUT_PATH}")
-else:
-    print("\nNo mismatches found.")
+    key_cols = sub[sub["Flag"].str.casefold()=="key"]["Column Name"].tolist()
+    exclude_cols = sub[sub["Flag"].str.casefold()=="exclude"]["Column Name"].tolist()
+    filter_cols = sub[sub["Flag"].str.casefold()=="filter"]["Column Name"].tolist()
+    filter_col = filter_cols[0] if filter_cols else None
 
-if name == "main": # Start resource monitoring proc = psutil.Process(os.getpid()) cpu_logs, mem_logs = [], [] running = True
+    sf_cols = get_columns(sf_conn, table, "snowflake")
+    vt_cols = get_columns(vt_conn, table, "vertica")
+    all_cols = list(set(sf_cols + vt_cols))
 
-def monitor():
-    while running:
-        cpu_logs.append(psutil.cpu_percent(interval=0.1))
-        mem_logs.append(proc.memory_info().rss / 1024**2)
-        time.sleep(1)
+    keys = resolve_columns(key_cols, all_cols, force_upper=True)
+    excludes = resolve_columns(exclude_cols, all_cols, force_upper=True) if exclude_cols else []
+    compare_cols = [c for c in set(sf_cols).intersection(vt_cols) if c not in keys + excludes]
 
-t = threading.Thread(target=monitor, daemon=True)
-t.start()
-start_time = time.time()
-start_mem = proc.memory_info().rss / 1024**2
+    # prepare Excel writer once
+    if os.path.exists(output_path):
+        os.remove(output_path)
+    writer = pd.ExcelWriter(output_path, engine='openpyxl', mode='w')
+    # write header
+    header_df = pd.DataFrame(columns=["TableName","ColumnName","ValueInVertica","ValueInSnowflake","Key"])
+    header_df.to_excel(writer, index=False)
+    writer.save()
 
-main()
+    startrow = 1  # after header
 
-running = False
-t.join(timeout=1)
-end_time = time.time()
-end_mem = proc.memory_info().rss / 1024**2
+    # Snowflake cursor for batching
+    sf_cur = sf_conn.cursor()
+    base_query = f'SELECT {",".join(f\'"{c}"\' for c in keys+compare_cols)} FROM "{SCHEMA}"."{table}"'
+    if filter_col:
+        base_query += f' WHERE "{filter_col}" BETWEEN %s AND %s'
+        sf_cur.execute(base_query, (START_DATETIME, END_DATETIME))
+    else:
+        sf_cur.execute(base_query)
 
-print("\nPerformance Report:")
-print(f"Execution Time: {end_time - start_time:.2f}s")
-if cpu_logs:
-    print(f"CPU Avg/Min/Max: {statistics.mean(cpu_logs):.2f}% / {min(cpu_logs):.2f}% / {max(cpu_logs):.2f}%")
-if mem_logs:
-    print(f"Memory Avg/Min/Max: {statistics.mean(mem_logs):.2f}MB / {min(mem_logs):.2f}MB / {max(mem_logs):.2f}MB")
-print(f"Final Memory: {end_mem:.2f}MB (Delta: {end_mem - start_mem:.2f}MB)")
+    while True:
+        batch = sf_cur.fetchmany(BATCH_SIZE)
+        if not batch:
+            break
+        df_sf = pd.DataFrame(batch, columns=[c.upper() for c in keys+compare_cols])
+        # fetch corresponding Vertica rows
+        key_list = df_sf[keys].drop_duplicates().values.tolist()
+        # build IN clause
+        in_clause = ",".join(f"'{k}'" for k in set(r[0] for r in key_list))  # single-key case
+        vt_query = f'SELECT {",".join(f\'"{c}"\' for c in keys+compare_cols)} FROM "{SCHEMA}"."{table}" WHERE "{keys[0]}" IN ({in_clause})'
+        vt_df = pd.read_sql(vt_query, vt_conn).add_suffix("_vt")
+        df_sf = df_sf.add_suffix("_sf")
+        merged = pd.merge(df_sf, vt_df, left_on=[f"{k}_sf" for k in keys], right_on=[f"{k}_vt" for k in keys], how="outer")
+        # compare this batch and write immediately
+        writer = pd.ExcelWriter(output_path, engine='openpyxl', mode='a', if_sheet_exists='overlay')
+        startrow = compare_rows(merged, compare_cols, keys, table, writer, startrow)
+        writer.save()
 
+    sf_cur.close()
+    print(f"{table}: comparison done")
+
+def main():
+    config = pd.read_excel("test.xlsx")
+    required = {"Table Name", "Flag", "Column Name"}
+    if not required.issubset(config.columns):
+        raise ValueError("Excel needs columns: Table Name, Flag, Column Name")
+
+    tables = config["Table Name"].dropna().unique()
+    sf_conn = connect_to_snowflake()
+    vt_conn = connect_to_vertica()
+
+    output_path = "comparison_report_prodd.xlsx"
+    try:
+        for tbl in tables:
+            compare_table(tbl, config, sf_conn, vt_conn, output_path)
+    finally:
+        sf_conn.close()
+        vt_conn.close()
+
+if __name__ == "__main__":
+    main()
