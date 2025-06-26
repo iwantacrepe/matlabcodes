@@ -1,158 +1,197 @@
-Below is a refactored version of your comparison script that processes each table in batches rather than pulling the entire million-row tables into memory at once. The key changes are:
+from openpyxl import load_workbook import os import pandas as pd import snowflake.connector import vertica_python from dotenv import load_dotenv import time import psutil import threading import statistics
 
-1. Chunked fetching from Snowflake via cursor.fetchmany().
+--- Configuration ---
 
+load_dotenv() SCHEMA = os.getenv("ER1_SCHEMA", "ER1") START_DATETIME = "2020-10-01 00:00:00" END_DATETIME = "2025-06-24 23:59:59" CHUNK_SIZE = 10000  # number of rows per batch fetch from Snowflake OUTPUT_PATH = "comparison_report_prodd.xlsx" CONFIG_FILE = "test.xlsx"
 
-2. For each Snowflake batch, we build a small WHERE clause to pull only the matching Vertica rows.
+--- Utility Functions ---
 
+def connect_to_snowflake(): return snowflake.connector.connect( account=os.getenv("URL_SF").split("//")[-1].split(".snowflakecomputing.com")[0], user=os.getenv("USER_SDL_SF"), private_key_file=os.path.join(os.getenv("DATA_ROOT"), os.getenv("KEYTAB_FILE_SDL_SF")), private_key_file_pwd=os.getenv("PASSWORD_SDL_SF"), database=os.getenv("DB_SDL_SF"), schema=os.getenv("SCHEMA_SDL_SF"), warehouse=os.getenv("WAREHOUSE_SDL_SF"), role=os.getenv("ROLE_SDL_SF"), authenticator="SNOWFLAKE_JWT" )
 
-3. We immediately write any mismatches for that batch to the Excel report (appending) and then discard the batch.
+def connect_to_vertica(): return vertica_python.connect( host=os.getenv("VERTICA_HOST"), port=int(os.getenv("VERTICA_PORT", 5433)), user=os.getenv("VERTICA_USER"), password=os.getenv("VERTICA_PASSWORD"), database=os.getenv("VERTICA_DB"), autocommit=True )
 
+def get_columns(conn, table, dbtype="snowflake"): if dbtype == "snowflake": with conn.cursor() as cur: cur.execute( """ SELECT column_name FROM INFORMATION_SCHEMA.COLUMNS WHERE table_schema = %s AND table_name = %s ORDER BY ordinal_position """, (SCHEMA, table) ) return [r[0] for r in cur.fetchall()] else: cur = conn.cursor() cur.execute( """ SELECT column_name FROM v_catalog.columns WHERE table_schema = %s AND table_name = %s ORDER BY ordinal_position """, (SCHEMA, table.lower()) ) cols = [r[0] for r in cur.fetchall()] cur.close() return cols
 
-4. We never hold both full tables in RAM simultaneously—only one batch at a time.
+def resolve_columns(requested, actual, force_upper=False): resolved = [] actual_map = {col.casefold(): col for col in actual} for col in requested: key = col.casefold() if key not in actual_map: raise ValueError(f"Column '{col}' not found in table {actual}") name = actual_map[key] resolved.append(name.upper() if force_upper else name) return resolved
 
+def format_value(val): return "NULL" if pd.isna(val) else str(val)
 
+def is_empty(val): return pd.isna(val) or str(val).strip() == ""
 
-from openpyxl import load_workbook
-import os
-import pandas as pd
-import snowflake.connector
-import vertica_python
-from dotenv import load_dotenv
+def compare_rows(df, compare_cols, keys, table): mismatches = [] for _, row in df.iterrows(): row_keys = ", ".join( format_value(row.get(f"{k}_sf")) if not is_empty(row.get(f"{k}_sf")) else format_value(row.get(f"{k}_vt")) for k in keys )
 
-pd.set_option("display.max_rows", None)
-pd.set_option("display.max_columns", None)
-pd.set_option("display.width", None)
-pd.set_option("display.max_colwidth", None)
+# Entire row missing checks
+    missing_vt = all(is_empty(row.get(f"{c}_vt")) for c in compare_cols) and any(not is_empty(row.get(f"{c}_sf")) for c in compare_cols)
+    missing_sf = all(is_empty(row.get(f"{c}_sf")) for c in compare_cols) and any(not is_empty(row.get(f"{c}_vt")) for c in compare_cols)
+    if missing_vt:
+        mismatches.append({
+            "TableName": table,
+            "ColumnName": "__KEY_MISSING__",
+            "ValueInVertica": "Missing in Vertica",
+            "ValueInSnowflake": "Present",
+            "Key": row_keys
+        })
+        continue
+    if missing_sf:
+        mismatches.append({
+            "TableName": table,
+            "ColumnName": "__KEY_MISSING__",
+            "ValueInVertica": "Present",
+            "ValueInSnowflake": "Missing in Snowflake",
+            "Key": row_keys
+        })
+        continue
 
-load_dotenv()
+    # Column-level mismatches
+    for col in compare_cols:
+        v_sf = row.get(f"{col}_sf")
+        v_vt = row.get(f"{col}_vt")
+        if (pd.isna(v_sf) ^ pd.isna(v_vt)) or (
+            not pd.isna(v_sf) and not pd.isna(v_vt) and
+            str(v_sf).strip().casefold() != str(v_vt).strip().casefold()
+        ):
+            mismatches.append({
+                "TableName": table,
+                "ColumnName": col,
+                "ValueInVertica": format_value(v_vt),
+                "ValueInSnowflake": format_value(v_sf),
+                "Key": row_keys
+            })
+return mismatches
 
-SCHEMA = os.getenv("ER1_SCHEMA", "ER1")
-START_DATETIME = "2020-10-01 00:00:00"
-END_DATETIME = "2025-06-24 23:59:59"
-CHUNK_SIZE = 10000  # adjust as needed for your memory/throughput trade-off
+--- Batch Comparison ---
 
-def compare_table(table, config_df, sf_conn, vt_conn, summary, output_path, first_write):
-    sub = config_df[config_df["Table Name"].str.casefold() == table.casefold()]
-    if (sub["Flag"].str.casefold() == "stage").any():
-        summary.append(f"{table}: Skipped (Stage flagged)")
-        return first_write
+def compare_table(table, config_df, sf_conn, vt_conn, summary, output_path, first_write): sub = config_df[config_df["Table Name"].str.casefold() == table.casefold()] if (sub["Flag"].str.casefold() == "stage").any(): summary.append(f"{table}: Skipped (Stage flagged)") return first_write
 
-    # identify key, exclude, and compare columns
-    key_cols     = sub[sub["Flag"].str.casefold() == "key"]["Column Name"].tolist()
-    exclude_cols = sub[sub["Flag"].str.casefold() == "exclude"]["Column Name"].tolist()
-    filter_cols  = sub[sub["Flag"].str.casefold() == "filter"]["Column Name"].tolist()
-    filter_col   = filter_cols[0] if filter_cols else None
+# Flags and columns
+key_cols     = sub[sub["Flag"].str.casefold() == "key"]["Column Name"].tolist()
+exclude_cols = sub[sub["Flag"].str.casefold() == "exclude"]["Column Name"].tolist()
+filter_cols  = sub[sub["Flag"].str.casefold() == "filter"]["Column Name"].tolist()
+filter_col   = filter_cols[0] if filter_cols else None
 
-    # fetch full list of columns just to resolve names & common set
-    sf_cols = get_columns(sf_conn, table, dbtype="snowflake")
-    vt_cols = get_columns(vt_conn, table, dbtype="vertica")
-    all_cols = list(set(sf_cols + vt_cols))
+# Resolve column lists
+sf_cols = get_columns(sf_conn, table, dbtype="snowflake")
+vt_cols = get_columns(vt_conn, table, dbtype="vertica")
+all_cols = sf_cols + [c for c in vt_cols if c not in sf_cols]
 
-    keys         = resolve_columns(key_cols, all_cols, force_upper=True)
-    excludes     = resolve_columns(exclude_cols, all_cols, force_upper=True) if exclude_cols else []
-    compare_cols = [c for c in sf_cols if c in vt_cols and c not in keys + excludes]
+keys         = resolve_columns(key_cols, all_cols, force_upper=True)
+excludes     = resolve_columns(exclude_cols, all_cols, force_upper=True) if exclude_cols else []
+compare_cols = [c for c in sf_cols if c in vt_cols and c not in keys + excludes]
 
-    # build SELECT list
-    select_cols = keys + compare_cols
-    col_str = ", ".join(f'"{c}"' for c in select_cols)
+select_cols = keys + compare_cols
+col_str = ", ".join(f'"{c}"' for c in select_cols)
 
-    # prepare Excel writer if first batch
-    if first_write:
-        if os.path.exists(output_path):
-            os.remove(output_path)
-        book = None
-    else:
-        book = load_workbook(output_path)
+# Prepare Excel output
+book = None
+if first_write and os.path.exists(output_path):
+    os.remove(output_path)
 
-    # Snowflake cursor and query
-    sf_cur = sf_conn.cursor()
-    base_query = f'SELECT {col_str} FROM "{SCHEMA}"."{table}"'
-    if filter_col:
-        base_query += f' WHERE "{filter_col}" BETWEEN \'{START_DATETIME}\' AND \'{END_DATETIME}\''
+# Snowflake cursor
+sf_cur = sf_conn.cursor()
+query = f'SELECT {col_str} FROM "{SCHEMA}"."{table}"'
+if filter_col:
+    query += f' WHERE "{filter_col}" BETWEEN \'{START_DATETIME}\' AND \'{END_DATETIME}\''
+sf_cur.execute(query)
 
-    sf_cur.execute(base_query)
+batch_idx = 0
+while True:
+    batch = sf_cur.fetchmany(CHUNK_SIZE)
+    if not batch:
+        break
+    batch_idx += 1
 
-    batch_num = 0
-    while True:
-        batch = sf_cur.fetchmany(CHUNK_SIZE)
-        if not batch:
-            break
-        batch_num += 1
+    df_sf = pd.DataFrame(batch, columns=[d[0].upper() for d in sf_cur.description]).add_suffix("_sf")
 
-        # build a small DataFrame for this batch
-        df_sf = pd.DataFrame(batch, columns=[d[0].upper() for d in sf_cur.description])
-        df_sf = df_sf.add_suffix("_sf")
+    # Build Vertica WHERE on keys
+    conds = []
+    for _, r in df_sf.iterrows():
+        parts = []
+        for k in keys:
+            v = r[f"{k}_sf"]
+            if pd.isna(v): parts.append(f'"{k}" IS NULL')
+            else:          parts.append(f'"{k}" = \'{v}\'')
+        conds.append("(" + " AND ".join(parts) + ")")
+    where_clause = " OR ".join(conds) or "1=0"
 
-        # build a dynamic WHERE to fetch matching Vertica rows by key
-        key_conds = []
-        for _, row in df_sf.iterrows():
-            parts = []
-            for k in keys:
-                val = row[f"{k}_sf"]
-                if pd.isna(val):
-                    parts.append(f'"{k}" IS NULL')
-                else:
-                    parts.append(f'"{k}" = \'{val}\'')
-            key_conds.append("(" + " AND ".join(parts) + ")")
-        vt_where = " OR ".join(key_conds) or "1=0"
-        vt_query = f'SELECT {col_str} FROM "{SCHEMA}"."{table}" WHERE {vt_where}'
+    vt_cur = vt_conn.cursor()
+    vt_cur.execute(f'SELECT {col_str} FROM "{SCHEMA}"."{table}" WHERE {where_clause}')
+    df_vt = pd.DataFrame(vt_cur.fetchall(), columns=[d[0].upper() for d in vt_cur.description]).add_suffix("_vt")
+    vt_cur.close()
 
-        # fetch and suffix
-        vt_cur = vt_conn.cursor()
-        vt_cur.execute(vt_query)
-        vt_rows = vt_cur.fetchall()
-        df_vt = pd.DataFrame(vt_rows, columns=[d[0].upper() for d in vt_cur.description]).add_suffix("_vt")
-        vt_cur.close()
+    merged = pd.merge(
+        df_sf, df_vt,
+        left_on=[f"{k}_sf" for k in keys],
+        right_on=[f"{k}_vt" for k in keys],
+        how="outer"
+    )
 
-        # merge this batch
-        merged = pd.merge(
-            df_sf, df_vt,
-            left_on=[f"{k}_sf" for k in keys],
-            right_on=[f"{k}_vt" for k in keys],
-            how='outer'
-        )
+    mism = compare_rows(merged, compare_cols, keys, table)
+    if mism:
+        out_df = pd.DataFrame(mism)[["TableName","ColumnName","ValueInVertica","ValueInSnowflake","Key"]]
+        with pd.ExcelWriter(output_path, engine="openpyxl", mode="w" if first_write else "a") as writer:
+            if book:
+                writer.book = book
+                writer.sheets = {ws.title: ws for ws in book.worksheets}
+                start = writer.sheets['Sheet1'].max_row
+            else:
+                start = 0
+            out_df.to_excel(writer, index=False, header=first_write, startrow=start)
+            first_write = False
+            book = writer.book
+    summary.append(f"{table} batch {batch_idx}: {len(df_sf)} rows, {len(mism)} mismatches")
 
-        # collect mismatches
-        mismatches = compare_rows(merged, compare_cols, keys, table)
-        if mismatches:
-            df_out = pd.DataFrame(mismatches)[["TableName","ColumnName","ValueInVertica","ValueInSnowflake","Key"]]
-            # append to Excel
-            with pd.ExcelWriter(output_path, engine="openpyxl", mode="w" if first_write else "a") as writer:
-                if book:
-                    writer.book = book
-                    writer.sheets = {ws.title: ws for ws in book.worksheets}
-                    start_row = writer.sheets['Sheet1'].max_row
-                else:
-                    start_row = 0
-                df_out.to_excel(writer, index=False, header=first_write, startrow=start_row)
-                first_write = False
-                book = writer.book  # carry forward for next append
+sf_cur.close()
+return first_write
 
-        summary.append(f"{table} batch {batch_num}: processed {len(df_sf)} rows, {len(mismatches)} mismatches")
+--- Main and Monitoring ---
 
-    sf_cur.close()
-    return first_write
+def main(): config = pd.read_excel(CONFIG_FILE) required = {"Table Name", "Flag", "Column Name"} if not required.issubset(config.columns): raise ValueError("Excel must contain Table Name, Flag, Column Name")
 
-What changed and why
+tables = config["Table Name"].dropna().unique()
+sf_conn = connect_to_snowflake()
+vt_conn = connect_to_vertica()
+summary = []
+first = True
 
-CHUNK_SIZE controls how many Snowflake rows you hold in memory at once.
+for tbl in tables:
+    first = compare_table(tbl, config, sf_conn, vt_conn, summary, OUTPUT_PATH, first)
 
-We use cursor.fetchmany() to pull only CHUNK_SIZE rows per loop.
+sf_conn.close()
+vt_conn.close()
 
-For each small batch, we immediately:
+print("\n=== Summary ===")
+for line in summary:
+    print(line)
+if os.path.exists(OUTPUT_PATH):
+    print(f"\nMismatch report saved to {OUTPUT_PATH}")
+else:
+    print("\nNo mismatches found.")
 
-1. Build a tiny Vertica query covering just those keys.
+if name == "main": # Start resource monitoring proc = psutil.Process(os.getpid()) cpu_logs, mem_logs = [], [] running = True
 
+def monitor():
+    while running:
+        cpu_logs.append(psutil.cpu_percent(interval=0.1))
+        mem_logs.append(proc.memory_info().rss / 1024**2)
+        time.sleep(1)
 
-2. Fetch, compare, and write any mismatches to the Excel file.
+t = threading.Thread(target=monitor, daemon=True)
+t.start()
+start_time = time.time()
+start_mem = proc.memory_info().rss / 1024**2
 
+main()
 
+running = False
+t.join(timeout=1)
+end_time = time.time()
+end_mem = proc.memory_info().rss / 1024**2
 
-We then discard the batch’s DataFrames before loading the next.
-
-At no point do we keep the full million-row tables in RAM, so memory usage stays roughly proportional to CHUNK_SIZE rather than total table size.
-
-
-This should reduce your peak memory footprint from multiple gigabytes down to whatever a single batch plus its merge requires (e.g. a few tens of megabytes). Feel free to tune CHUNK_SIZE up or down depending on the sweet spot between memory use and query overhead.
+print("\nPerformance Report:")
+print(f"Execution Time: {end_time - start_time:.2f}s")
+if cpu_logs:
+    print(f"CPU Avg/Min/Max: {statistics.mean(cpu_logs):.2f}% / {min(cpu_logs):.2f}% / {max(cpu_logs):.2f}%")
+if mem_logs:
+    print(f"Memory Avg/Min/Max: {statistics.mean(mem_logs):.2f}MB / {min(mem_logs):.2f}MB / {max(mem_logs):.2f}MB")
+print(f"Final Memory: {end_mem:.2f}MB (Delta: {end_mem - start_mem:.2f}MB)")
 
