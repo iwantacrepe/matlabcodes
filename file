@@ -4,337 +4,242 @@ import snowflake.connector
 import vertica_python
 from dotenv import load_dotenv
 
+# --- Configuration & Setup ---
 pd.set_option("display.max_rows", None)
 pd.set_option("display.max_columns", None)
 pd.set_option("display.width", None)
 pd.set_option("display.max_colwidth", None)
 
 load_dotenv()
-
 SCHEMA = os.getenv("ER1_SCHEMA", "ER1")
-START_DATETIME = "2020-10-01 00:00:00"
-END_DATETIME = "2025-06-26 23:59:59" # Updated to current date as of request
-BATCH_SIZE = 100000
+OUTPUT_TABLE = "vertica_snowflake_comparison_DDL"
 
+# --- Helper Functions ---
+def normalize(name: str) -> str:
+    """Returns a case-insensitive version of a string."""
+    return name.casefold()
+
+# --- Connection Functions ---
 def connect_to_snowflake():
-    return snowflake.connector.connect(
-        account=os.getenv("URL_SF").split("//")[-1].split(".snowflakecomputing.com")[0],
-        user=os.getenv("USER_SDL_SF"),
-        private_key_file=os.path.join(os.getenv("DATA_ROOT"), os.getenv("KEYTAB_FILE_SDL_SF")),
-        private_key_file_pwd=os.getenv("PASSWORD_SDL_SF"),
-        database=os.getenv("DB_SDL_SF"),
-        schema=os.getenv("SCHEMA_SDL_SF"),
-        warehouse=os.getenv("WAREHOUSE_SDL_SF"),
-        role=os.getenv("ROLE_SDL_SF"),
-        authenticator="SNOWFLAKE_JWT"
-    )
+    """Establishes a connection to the source Snowflake database."""
+    print("Connecting to source Snowflake...")
+    try:
+        conn = snowflake.connector.connect(
+            account=os.getenv("URL_SF").split("//")[-1].split(".snowflakecomputing.com")[0],
+            user=os.getenv("USER_SDL_SF"),
+            private_key_file=os.path.join(os.getenv("DATA_ROOT"), os.getenv("KEYTAB_FILE_SDL_SF")),
+            private_key_file_pwd=os.getenv("PASSWORD_SDL_SF"),
+            database=os.getenv("DB_SDL_SF"),
+            schema=os.getenv("SCHEMA_SDL_SF"),
+            warehouse=os.getenv("WAREHOUSE_SDL_SF"),
+            role=os.getenv("ROLE_SDL_SF"),
+            authenticator='SNOWFLAKE_JWT'
+        )
+        print("Source Snowflake connected.")
+        return conn
+    except Exception as e:
+        print(f"Error connecting to source Snowflake: {e}")
+        raise
 
 def connect_to_vertica():
-    return vertica_python.connect(
-        host=os.getenv("VERTICA_HOST"),
-        port=int(os.getenv("VERTICA_PORT", 5433)),
-        user=os.getenv("VERTICA_USER"),
-        password=os.getenv("VERTICA_PASSWORD"),
-        database=os.getenv("VERTICA_DB"),
-        autocommit=True
-    )
+    """Establishes a connection to the source Vertica database."""
+    print("Connecting to source Vertica...")
+    try:
+        conn = vertica_python.connect(
+            host=os.getenv("VERTICA_HOST"),
+            port=int(os.getenv("VERTICA_PORT", 5433)),
+            user=os.getenv("VERTICA_USER"),
+            password=os.getenv("VERTICA_PASSWORD"),
+            database=os.getenv("VERTICA_DB"),
+            autocommit=True
+        )
+        print("Source Vertica connected.")
+        return conn
+    except Exception as e:
+        print(f"Error connecting to source Vertica: {e}")
+        raise
 
 def connect_to_vertica_dev():
-    return vertica_python.connect(
-        host=os.getenv("VERTICA_HOST_DEV"),
-        port=int(os.getenv("VERTICA_PORT_DEV", 5433)),
-        user=os.getenv("VERTICA_USER_DEV"),
-        password=os.getenv("VERTICA_PASSWORD_DEV"),
-        database=os.getenv("VERTICA_DB_DEV"),
-        autocommit=True
-    )
+    """Establishes a connection to the destination Vertica DEV database for logging."""
+    print("Connecting to destination Vertica (DEV)...")
+    try:
+        conn = vertica_python.connect(
+            host=os.getenv("VERTICA_HOST_DEV"),
+            port=int(os.getenv("VERTICA_PORT_DEV", 5433)),
+            user=os.getenv("VERTICA_USER_DEV"),
+            password=os.getenv("VERTICA_PASSWORD_DEV"),
+            database=os.getenv("VERTICA_DB_DEV"),
+            autocommit=True
+        )
+        print("Destination Vertica (DEV) connected.")
+        return conn
+    except Exception as e:
+        print(f"Error connecting to destination Vertica (DEV): {e}")
+        raise
 
-# The function now accepts a generic object_name (table or view)
-def get_columns(conn, object_name, dbtype="snowflake"):
-    # The information schema queries work for both tables and views
-    if dbtype == "snowflake":
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT column_name
-                FROM INFORMATION_SCHEMA.COLUMNS
-                WHERE table_schema = %s AND table_name = %s
-                ORDER BY ordinal_position
-            """, (SCHEMA, object_name))
-            return [r[0] for r in cur.fetchall()]
-    else:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT column_name
-            FROM v_catalog.columns
-            WHERE table_schema = %s AND table_name = %s
-            ORDER BY ordinal_position
-        """, (SCHEMA, object_name.lower()))
-        cols = [r[0] for r in cur.fetchall()]
-        cur.close()
-        return cols
+# --- Metadata Fetching Functions ---
+def get_snowflake_tables(conn, schema_name):
+    """Fetches table names from Snowflake."""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT table_name FROM INFORMATION_SCHEMA.TABLES WHERE table_schema = %s", (schema_name,))
+        return [row[0] for row in cur.fetchall()]
 
-def resolve_columns(requested, actual, force_upper=False):
-    resolved = []
-    actual_map = {col.casefold(): col for col in actual}
-    for col in requested:
-        if col.casefold() not in actual_map:
-            raise ValueError(f"Column '{col}' not found in table")
-        resolved_name = actual_map[col.casefold()]
-        if force_upper:
-            resolved_name = resolved_name.upper()
-        resolved.append(resolved_name)
-    return resolved
+def get_vertica_tables(conn, schema_name):
+    """Fetches table names from Vertica."""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT table_name FROM v_catalog.tables WHERE table_schema = %s", (schema_name,))
+        return [row[0] for row in cur.fetchall()]
 
-def format_value(val):
-    return "NULL" if pd.isna(val) else str(val)
+def get_snowflake_columns(conn, table_name, schema_name):
+    """Fetches column names for a given table from Snowflake."""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT column_name FROM INFORMATION_SCHEMA.COLUMNS WHERE table_schema = %s AND table_name = %s", (schema_name, table_name))
+        return [row[0] for row in cur.fetchall()]
 
-def is_empty(val):
-    return pd.isna(val) or str(val).strip() == ""
+def get_vertica_columns(conn, table_name, schema_name):
+    """Fetches column names for a given table from Vertica."""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT column_name FROM v_catalog.columns WHERE table_schema = %s AND UPPER(table_name) = UPPER(%s)", (schema_name, table_name))
+        return [row[0] for row in cur.fetchall()]
 
-# Renamed 'table' to 'object_name' for clarity
-def compare_rows(df, compare_cols, keys, object_name):
-    mismatches = []
-    for _, row in df.iterrows():
-        row_keys = ", ".join([
-            format_value(row.get(f"{k}_sf")) if not pd.isna(row.get(f"{k}_sf"))
-            else format_value(row.get(f"{k}_vt")) for k in keys
-        ])
-
-        is_entirely_missing_in_vt = all(is_empty(row.get(f"{col}_vt")) for col in compare_cols) and any(not is_empty(row.get(f"{col}_sf")) for col in compare_cols)
-        is_entirely_missing_in_sf = all(is_empty(row.get(f"{col}_sf")) for col in compare_cols) and any(not is_empty(row.get(f"{col}_vt")) for col in compare_cols)
-        
-        if is_entirely_missing_in_vt:
-            mismatches.append({
-                # Renamed "TableName" to "ObjectName" to reflect the change
-                "ObjectName": object_name,
-                "ColumnName": "__KEY_MISSING__",
-                "ValueInVertica": "Missing in Vertica",
-                "ValueInSnowflake": "Present",
-                "Key": row_keys
-            })
-            continue
-
-        if is_entirely_missing_in_sf:
-            mismatches.append({
-                "ObjectName": object_name,
-                "ColumnName": "__KEY_MISSING__",
-                "ValueInVertica": "Present",
-                "ValueInSnowflake": "Missing in Snowflake",
-                "Key": row_keys
-            })
-            continue
-
-        for col in compare_cols:
-            val_sf = row.get(f"{col}_sf")
-            val_vt = row.get(f"{col}_vt")
-
-            if pd.isna(val_sf) and pd.isna(val_vt):
-                continue
-
-            if pd.isna(val_sf) != pd.isna(val_vt) or (
-                not pd.isna(val_sf) and not pd.isna(val_vt) and
-                str(val_sf).strip().casefold() != str(val_vt).strip().casefold()
-            ):
-                mismatches.append({
-                    "ObjectName": object_name,
-                    "ColumnName": col,
-                    "ValueInVertica": format_value(val_vt),
-                    "ValueInSnowflake": format_value(val_sf), 
-                    "Key": row_keys
-                })
-
-    return mismatches
-
-# Renamed 'table' parameter to 'object_name'
-def compare_object(object_name, config_df, sf_conn, vt_conn, vt_dev_conn, summary):
-    # Now filters based on "Object Name" from the config file
-    sub = config_df[config_df["Object Name"].str.casefold() == object_name.casefold()]
-    if (sub["Flag"].str.casefold() == "stage").any():
-        summary.append(f"{object_name}: Skipped (Stage flagged)")
+# --- Data Writing Function ---
+def write_mismatches_to_vertica(conn, mismatches_df):
+    """Clears the target table and writes the mismatch DataFrame to Vertica."""
+    if mismatches_df.empty:
+        print("\nNo mismatches found. Nothing to write.")
         return
 
-    key_cols = sub[sub["Flag"].str.casefold() == "key"]["Column Name"].tolist()
-    exclude_cols = sub[sub["Flag"].str.casefold() == "exclude"]["Column Name"].tolist()
-    filter_cols = sub[sub["Flag"].str.casefold() == "filter"]["Column Name"].tolist()
-    filter_col = filter_cols[0] if filter_cols else None
+    print(f"\nWriting {len(mismatches_df)} mismatches to Vertica table: {OUTPUT_TABLE}...")
+    with conn.cursor() as cur:
+        try:
+            # Clear the table before inserting new data
+            print(f"Truncating table {OUTPUT_TABLE}...")
+            cur.execute(f"TRUNCATE TABLE {OUTPUT_TABLE};")
+            print("Table truncated.")
 
-    if not key_cols:
-        summary.append(f"{object_name}: Skipped (No key columns defined)")
-        return
-        
-    sf_cols = get_columns(sf_conn, object_name, dbtype="snowflake")
-    vt_cols = get_columns(vt_conn, object_name, dbtype="vertica")
-
-    sf_norm_map = {col.casefold(): col for col in sf_cols}
-    vt_norm_map = {col.casefold(): col for col in vt_cols}
-    common_norm = set(sf_norm_map.keys()) & set(vt_norm_map.keys())
-    common_cols = [sf_norm_map[n] for n in common_norm]
-    all_cols = list(set(sf_cols + vt_cols))
-
-    keys = resolve_columns(key_cols, all_cols, force_upper=True)
-    excludes = resolve_columns(exclude_cols, all_cols, force_upper=True) if exclude_cols else []
-    compare_cols = [col for col in common_cols if col not in keys + excludes]
-
-    def fetch_df_batch(conn, dbtype, limit, offset):
-        cols_to_fetch = keys + compare_cols
-        col_str = ", ".join(f'"{c}"' for c in cols_to_fetch)
-        # The SELECT statement works for both tables and views
-        query = f'SELECT {col_str} FROM "{SCHEMA}"."{object_name}"'
-        if filter_col:
-            query += f' WHERE "{filter_col}" BETWEEN \'{START_DATETIME}\' AND \'{END_DATETIME}\''
-        order_by_str = ", ".join(f'"{k}"' for k in keys)
-        query += f' ORDER BY {order_by_str}'
-        query += f' LIMIT {limit} OFFSET {offset}'
-        with conn.cursor() as cur:
-            cur.execute(query)
-            columns = [desc[0].upper() for desc in cur.description] if cur.description else [c.upper() for c in cols_to_fetch]
-            return pd.DataFrame(cur.fetchall(), columns=columns)
-
-    offset = 0
-    mismatches_found_for_object = False
-    while True:
-        df_sf = fetch_df_batch(sf_conn, "snowflake", BATCH_SIZE, offset)
-        df_vt = fetch_df_batch(vt_conn, "vertica", BATCH_SIZE, offset)
-
-        if df_sf.empty and df_vt.empty:
-            break
-
-        df_sf = df_sf.add_suffix("_sf")
-        df_vt = df_vt.add_suffix("_vt")
-
-        merged = pd.merge(df_sf, df_vt,
-                          left_on=[f"{k}_sf" for k in keys],
-                          right_on=[f"{k}_vt" for k in keys],
-                          how='outer')
-
-        mismatches = compare_rows(merged, compare_cols, keys, object_name)
-
-        if mismatches:
-            mismatches_found_for_object = True
-            
-            data_to_insert = [
-                (m['ObjectName'], m['ColumnName'], m['ValueInVertica'], m['ValueInSnowflake'], m['Key'])
-                for m in mismatches
-            ]
-            
-            # The destination table name is still hard-coded, which is correct
-            insert_query = """
-                INSERT INTO vertica_snowflake_comparison
-                (table_name, column_name, valueinvertica, valueinsnowflake, unique_key)
+            # Prepare data for insertion
+            insert_query = f"""
+                INSERT INTO {OUTPUT_TABLE} (table_name, column_name, objecttype, presentinvertica, presentinsnowflake)
                 VALUES (%s, %s, %s, %s, %s)
             """
-            
-            with vt_dev_conn.cursor() as cur:
-                cur.executemany(insert_query, data_to_insert)
+            data_to_insert = [tuple(row) for row in mismatches_df.to_numpy()]
 
-        offset += BATCH_SIZE
+            # Execute the insert operation
+            cur.executemany(insert_query, data_to_insert)
+            conn.commit()
+            print(f"Successfully inserted {len(data_to_insert)} records.")
 
-    if mismatches_found_for_object:
-        summary.append(f"{object_name}: Mismatches found and written to database")
-    else:
-        summary.append(f"{object_name}: No mismatches")
+        except Exception as e:
+            print(f"An error occurred while writing to Vertica: {e}")
+            conn.rollback()
+            raise
 
 def main():
-    config = pd.read_excel("test.xlsx")
-    # Updated required columns to look for "Object Name"
-    required_cols = {"Object Name", "Flag", "Column Name"}
-    if not required_cols.issubset(config.columns):
-        raise ValueError("Excel file must have columns: Object Name, Flag, Column Name")
-
-    # Renamed variable for clarity
-    object_names = config["Object Name"].dropna().unique()
-    sf_conn = connect_to_snowflake()
-    vt_conn = connect_to_vertica()
-    vt_dev_conn = connect_to_vertica_dev()
-    
-    summary = []
-    mismatches_found_overall = False
+    sf_conn = None
+    vt_conn = None
+    vt_dev_conn = None
 
     try:
-        with vt_dev_conn.cursor() as cur:
-             print("Truncating destination table: vertica_snowflake_comparison")
-             cur.execute("TRUNCATE TABLE vertica_snowflake_comparison")
+        # Establish all database connections
+        sf_conn = connect_to_snowflake()
+        vt_conn = connect_to_vertica()
+        vt_dev_conn = connect_to_vertica_dev()
 
-        # Renamed loop variable for clarity
-        for object_name in object_names:
-            compare_object(object_name, config, sf_conn, vt_conn, vt_dev_conn, summary)
+        # Fetch table lists
+        sf_tables = get_snowflake_tables(sf_conn, SCHEMA)
+        vt_tables = get_vertica_tables(vt_conn, SCHEMA)
+
+        # Create maps from normalized name to original name for case preservation
+        sf_table_map = {normalize(t): t for t in sf_tables}
+        vt_table_map = {normalize(t): t for t in vt_tables}
+
+        sf_norm_set = set(sf_table_map.keys())
+        vt_norm_set = set(vt_table_map.keys())
+
+        # --- 1. Find Table-Level Mismatches ---
+        mismatches = []
+        tables_only_in_sf = sf_norm_set - vt_norm_set
+        tables_only_in_vt = vt_norm_set - sf_norm_set
+
+        for norm_table in sorted(tables_only_in_sf):
+            mismatches.append({
+                "TableName": sf_table_map[norm_table],
+                "ColumnName": "N/A",
+                "ObjectType": "table",
+                "PresentInVertica": "N",
+                "PresentInSnowflake": "Y",
+            })
+
+        for norm_table in sorted(tables_only_in_vt):
+            mismatches.append({
+                "TableName": vt_table_map[norm_table],
+                "ColumnName": "N/A",
+                "ObjectType": "table",
+                "PresentInVertica": "Y",
+                "PresentInSnowflake": "N",
+            })
+
+        # --- 2. Find Column-Level Mismatches for Common Tables ---
+        common_tables = sorted(sf_norm_set.intersection(vt_norm_set))
+        print(f"\nFound {len(common_tables)} common tables to compare for column differences...")
+
+        for norm_table in common_tables:
+            sf_table_name = sf_table_map[norm_table]
+            vt_table_name = vt_table_map[norm_table]
+
+            sf_cols = get_snowflake_columns(sf_conn, sf_table_name, SCHEMA)
+            vt_cols = get_vertica_columns(vt_conn, vt_table_name, SCHEMA)
+
+            sf_col_map = {normalize(col): col for col in sf_cols}
+            vt_col_map = {normalize(col): col for col in vt_cols}
+
+            sf_col_norm_set = set(sf_col_map.keys())
+            vt_col_norm_set = set(vt_col_map.keys())
+
+            cols_only_in_sf = sf_col_norm_set - vt_col_norm_set
+            cols_only_in_vt = vt_col_norm_set - sf_col_norm_set
+
+            for col_norm in sorted(cols_only_in_sf):
+                mismatches.append({
+                    "TableName": sf_table_name,
+                    "ColumnName": sf_col_map[col_norm],
+                    "ObjectType": "column",
+                    "PresentInVertica": "N",
+                    "PresentInSnowflake": "Y",
+                })
+
+            for col_norm in sorted(cols_only_in_vt):
+                 mismatches.append({
+                    "TableName": sf_table_name, # Use one name consistently
+                    "ColumnName": vt_col_map[col_norm],
+                    "ObjectType": "column",
+                    "PresentInVertica": "Y",
+                    "PresentInSnowflake": "N",
+                })
+
+        # --- 3. Process and Write Results ---
+        if not mismatches:
+            print("\n=== COMPARISON COMPLETE: No mismatches found. ===")
+        else:
+            final_df = pd.DataFrame(mismatches)
+            print("\n=== MISMATCHES FOUND ===")
+            print(final_df.to_string(index=False))
+            
+            # Write the results to the Vertica DEV database
+            write_mismatches_to_vertica(vt_dev_conn, final_df)
+
+    except Exception as e:
+        print(f"\nAn unexpected error occurred in main execution: {e}")
     finally:
-        sf_conn.close()
-        vt_conn.close()
-        vt_dev_conn.close()
+        # Close all connections
+        if sf_conn:
+            sf_conn.close()
+        if vt_conn:
+            vt_conn.close()
+        if vt_dev_conn:
+            vt_dev_conn.close()
+        print("\nConnections closed.")
 
-    print("\n=== Summary ===")
-    for line in summary:
-        print(line)
-        if "Mismatches found" in line:
-            mismatches_found_overall = True
-
-    if mismatches_found_overall:
-        print("\nMismatch report saved to Vertica table: vertica_snowflake_comparison")
-    else:
-        print("\nNo mismatches found.")
 
 if __name__ == "__main__":
-    import time
-    import psutil
-    import os
-    import threading
-    import statistics
-
-    process = psutil.Process(os.getpid())
-    
-    cpu_percentages = []
-    memory_usages = []
-    
-    monitoring = True
-
-    def monitor_resources():
-        while monitoring:
-            cpu_percentages.append(psutil.cpu_percent(interval=0.1))
-            memory_usages.append(process.memory_info().rss / 1024 / 1024) 
-            time.sleep(1)  
-    
-    monitor_thread = threading.Thread(target=monitor_resources)
-    monitor_thread.daemon = True
-    monitor_thread.start()
-    
-    start_time = time.time()
-    start_memory = process.memory_info().rss / 1024 / 1024  
-    
     main()
-    
-    monitoring = False
-    monitor_thread.join(timeout=1.0)
-    
-    end_time = time.time()
-    end_memory = process.memory_info().rss / 1024 / 1024  
-    
-    execution_time = end_time - start_time
-    memory_used = end_memory - start_memory
-    
-    if cpu_percentages:
-        avg_cpu = statistics.mean(cpu_percentages)
-        max_cpu = max(cpu_percentages)
-        min_cpu = min(cpu_percentages)
-    else:
-        avg_cpu = max_cpu = min_cpu = 0
-        
-    if memory_usages:
-        avg_memory = statistics.mean(memory_usages)
-        max_memory = max(memory_usages)
-        min_memory = min(memory_usages)
-    else:
-        avg_memory = max_memory = min_memory = 0
-    
-    print(f"Performance Report:")
-    print(f"Execution Time: {execution_time:.4f} seconds")
-    print(f"CPU Usage:")
-    print(f"  - Average: {avg_cpu:.2f}%")
-    print(f"  - Maximum: {max_cpu:.2f}%")
-    print(f"  - Minimum: {min_cpu:.2f}%")
-    print(f"Memory Usage:")
-    print(f"  - Average: {avg_memory:.2f} MB")
-    print(f"  - Maximum: {max_memory:.2f} MB")
-    print(f"  - Minimum: {min_memory:.2f} MB")
-    print(f"  - Final: {end_memory:.2f} MB")
-    print(f"  - Net Change: {memory_used:.2f} MB")
