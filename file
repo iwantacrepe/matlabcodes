@@ -1,11 +1,12 @@
-ALTER TABLE vertica_snowflake_comparison_DDL 
-ADD COLUMN insrt_ts timestamp DEFAULT (statement_timestamp());
-
-ALTER TABLE vertica_snowflake_comparison_DDL 
-ADD COLUMN updt_ts timestamp;
-
-ALTER TABLE vertica_snowflake_comparison_DDL 
-ADD COLUMN etl_trns varchar(50);
-
-ALTER TABLE vertica_snowflake_comparison_DDL 
-ADD COLUMN etl_job varchar(50);
+CREATE TABLE vertica_snowflake_view_data_comparison (
+    id IDENTITY,
+    view_name VARCHAR(255),
+    column_name VARCHAR(255),
+    value_in_vertica VARCHAR(255),
+    value_in_snowflake VARCHAR(255),
+    unique_key VARCHAR(255),
+    insrt_ts TIMESTAMP DEFAULT (statement_timestamp()),
+    updt_ts TIMESTAMP,
+    etl_trns VARCHAR(50),
+    etl_job VARCHAR(50)
+);
