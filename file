@@ -1,12 +1,11 @@
-CREATE TABLE vertica_snowflake_view_data_comparison (
-    id IDENTITY,
-    view_name VARCHAR(255),
-    column_name VARCHAR(255),
-    value_in_vertica VARCHAR(255),
-    value_in_snowflake VARCHAR(255),
-    unique_key VARCHAR(255),
-    insrt_ts TIMESTAMP DEFAULT (statement_timestamp()),
-    updt_ts TIMESTAMP,
-    etl_trns VARCHAR(50),
-    etl_job VARCHAR(50)
-);
+if pd.isna(val_sf) != pd.isna(val_vt) or (
+    not pd.isna(val_sf) and not pd.isna(val_vt) and
+    str(val_sf).strip().casefold() != str(val_vt).strip().casefold()
+):
+    mismatches.append({
+        "ViewName": view_name,
+        "ColumnName": col,
+        "ValueInVertica": format_value(val_vt)[:255] if val_vt is not None else "",
+        "ValueInSnowflake": format_value(val_sf)[:255] if val_sf is not None else "",
+        "Key": row_keys
+    })
