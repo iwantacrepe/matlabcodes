@@ -1,11 +1,22 @@
-if pd.isna(val_sf) != pd.isna(val_vt) or (
-    not pd.isna(val_sf) and not pd.isna(val_vt) and
-    str(val_sf).strip().casefold() != str(val_vt).strip().casefold()
-):
-    mismatches.append({
-        "ViewName": view_name,
-        "ColumnName": col,
-        "ValueInVertica": format_value(val_vt)[:255] if val_vt is not None else "",
-        "ValueInSnowflake": format_value(val_sf)[:255] if val_sf is not None else "",
-        "Key": row_keys
-    })
+import dask.dataframe as dd
+import pandas as pd
+import os
+
+csv_path = "large_file.csv"
+output_dir = "output_parquet_chunks"
+os.makedirs(output_dir, exist_ok=True)
+
+# Manually read CSV using pandas in chunks, then convert each to dask dataframe
+chunksize = 500_000  # rows per chunk (adjust as needed)
+reader = pd.read_csv(csv_path, chunksize=chunksize)
+
+for i, chunk in enumerate(reader):
+    print(f"Processing chunk {i + 1}")
+    
+    # Convert pandas DataFrame to Dask DataFrame with 1 partition
+    ddf = dd.from_pandas(chunk, npartitions=1)
+
+    # Save each chunk as a separate Parquet file
+    ddf.to_parquet(f"{output_dir}/chunk_{i}.parquet", engine="pyarrow", compression="snappy", write_index=False)
+
+print("✅ All chunks converted to Parquet using Dask.")
