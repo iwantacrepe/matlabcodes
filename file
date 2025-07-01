@@ -1,12 +1,34 @@
 import dask.dataframe as dd
+import os
 
-csv_path = "large_file.csv"
-output_dir = "output_parquet_chunks"
+# === CONFIG ===
+csv_path = "large_file.csv"                 # Path to your large CSV
+output_dir = "output_parquet_chunks"        # Folder to store output Parquet files
+blocksize = "64MB"                          # How much to read per chunk (tune as needed)
 
-# Read in partitions
-ddf = dd.read_csv(csv_path, blocksize="64MB")  # Creates small chunks
+# === SETUP ===
+os.makedirs(output_dir, exist_ok=True)
 
-# Process and write one partition at a time (like manual loop)
+# Read CSV with controlled block size
+print("🔄 Reading CSV in chunks...")
+ddf = dd.read_csv(csv_path, blocksize=blocksize)
+
+# Show number of partitions (i.e., chunks)
+print(f"🧩 Number of partitions (blocks): {ddf.npartitions}")
+
+# Process and write each partition one-by-one to keep memory low
 for i in range(ddf.npartitions):
-    part = ddf.get_partition(i)
-    part.to_parquet(f"{output_dir}/part_{i}.parquet", engine="pyarrow", write_index=False, compression="snappy", compute=True)
+    print(f"📦 Writing partition {i + 1}/{ddf.npartitions}...")
+    
+    partition = ddf.get_partition(i)
+    
+    # Save each partition as an individual Parquet file
+    partition.to_parquet(
+        f"{output_dir}/part_{i}.parquet",
+        engine="pyarrow",
+        write_index=False,
+        compression="snappy",
+        compute=True
+    )
+
+print("✅ Done: All partitions written as separate Parquet files.")
