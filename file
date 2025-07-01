@@ -1,22 +1,12 @@
 import dask.dataframe as dd
-import pandas as pd
-import os
 
 csv_path = "large_file.csv"
 output_dir = "output_parquet_chunks"
-os.makedirs(output_dir, exist_ok=True)
 
-# Manually read CSV using pandas in chunks, then convert each to dask dataframe
-chunksize = 500_000  # rows per chunk (adjust as needed)
-reader = pd.read_csv(csv_path, chunksize=chunksize)
+# Read in partitions
+ddf = dd.read_csv(csv_path, blocksize="64MB")  # Creates small chunks
 
-for i, chunk in enumerate(reader):
-    print(f"Processing chunk {i + 1}")
-    
-    # Convert pandas DataFrame to Dask DataFrame with 1 partition
-    ddf = dd.from_pandas(chunk, npartitions=1)
-
-    # Save each chunk as a separate Parquet file
-    ddf.to_parquet(f"{output_dir}/chunk_{i}.parquet", engine="pyarrow", compression="snappy", write_index=False)
-
-print("✅ All chunks converted to Parquet using Dask.")
+# Process and write one partition at a time (like manual loop)
+for i in range(ddf.npartitions):
+    part = ddf.get_partition(i)
+    part.to_parquet(f"{output_dir}/part_{i}.parquet", engine="pyarrow", write_index=False, compression="snappy", compute=True)
