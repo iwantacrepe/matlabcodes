@@ -1,39 +1,19 @@
-Of course. This expanded prompt is designed to be a comprehensive creative and technical brief. It provides extensive detail, uses deeper knowledge of BNY's operations, and specifies the exact CSV output format required, leaving very little to chance while pushing the AI to generate a superior, theme-aligned response.
-Here is the prompt:
-You are a Lead Communications Architect at a top-tier tech branding firm. You have been hired by BNY to create their core messaging for a Gen-Z audience at a major tech conference. The primary objective is to completely shed the "old bank" image and present BNY as an indispensable, innovative, and secure part of the global technology infrastructure.
-Your task is to generate the script and foundational content for this presentation. The final output MUST be in a CSV format with two columns: Category and Detail.
-Below are the exact rows and the detailed instructions for the content of each Detail cell. Adhere strictly to these instructions, infusing them with the specified tone and keywords.
-CSV Content Instructions:
- * For the Category "Prompt_Title", the Detail should be: BNY: The Mission Control of Global Finance
- * For the Category "Target_Audience", the Detail should be: High School & University Students (Gen-Z)
- * For the Category "Core_Analogy_Expanded", the Detail must be an engaging, tech-forward explanation.
-   * Instruction: Write a detailed analogy of BNY as "Mission Control for the World's Money." Do not describe it as a bank, but as a technology and data company. Use keywords like "advanced technology," "AI," "real-time telemetry on assets," "navigating complex market regulations," "cybersecurity," and "digital asset custody." Explain that BNY provides the secure, intelligent platform that tracks, guides, and protects trillions of dollars for the world's biggest institutions as they move around the globe.
- * For the Category "Executive_Summary", the Detail must be a powerful, concise summary.
-   * Instruction: In under 75 words, synthesize the "Mission Control" analogy and the core purpose of BNY. It should be punchy and memorable, perfect for an opening statement.
- * For the Category "Pillar_1_Directive", the Detail should be: Be More for Clients
- * For the Category "Pillar_1_Action_Detail", the Detail must focus on client-facing innovation.
-   * Instruction: Describe this pillar as giving clients the "smartest data and mission-critical tools." Mention using "predictive data analytics" and "AI-driven insights" to help clients see future trends and navigate their financial missions successfully.
- * For the Category "Pillar_2_Directive", the Detail should be: Run the Company Better
- * For the Category "Pillar_2_Action_Detail", the Detail must focus on internal innovation and efficiency.
-   * Instruction: Describe this pillar as making Mission Control "faster, smarter, and more resilient." Mention the use of "automation, robotics, and machine learning" to streamline complex global operations, reduce risk, and increase processing speed.
- * For the Category "Pillar_3_Directive", the Detail should be: Power Our Culture
- * For the Category "Pillar_3_Action_Detail", the Detail must focus on the human element of the tech company.
-   * Instruction: Describe this pillar as "unifying the flight crew." Explain that this means fostering a "one team" culture of "engineers, data scientists, financial experts, and security specialists" who are all dedicated to the success and safety of every mission.
- * For the Category "Chart_Title", the Detail should be: BNY's Mission-Critical Blueprint
- * For the Category "Chart_Data_CSV", the Detail must be a single line of comma-separated values representing the chart.
-   * Instruction: Create a single-line, comma-separated string that a program could parse to make a simple chart. The format should be: "Pillar 1: Smart Tools for Clients","Pillar 2: Peak Operational Efficiency","Pillar 3: Unified Expert Team"
-Expected Final Output from the AI (in CSV Format):
-Category,Detail
-Prompt_Title,"BNY: The Mission Control of Global Finance"
-Target_Audience,"High School & University Students (Gen-Z)"
-Core_Analogy_Expanded,"Imagine BNY as the 'Mission Control for the World's Money.' It's not a bank; it's a technology and data company. Using advanced technology and AI, BNY provides real-time telemetry on assets, navigating complex market regulations to ensure every transaction is secure. It's the intelligent platform that tracks, guides, and protects trillions of dollars for global institutions, featuring best-in-class cybersecurity and digital asset custody to safeguard the future of finance."
-Executive_Summary,"BNY is the Mission Control for global finance. We don't just move money; we provide the secure, AI-powered technology platform that the world's leading institutions trust to track, guide, and protect their assets. We are the trusted architects of the financial world's technology backbone, ensuring every mission-critical operation succeeds."
-Pillar_1_Directive,"Be More for Clients"
-Pillar_1_Action_Detail,"This means giving our clients the smartest data and mission-critical tools. We use predictive data analytics and AI-driven insights to help them see around corners, anticipate future market trends, and successfully navigate their most complex financial missions."
-Pillar_2_Directive,"Run the Company Better"
-Pillar_2_Action_Detail,"This is about making Mission Control faster, smarter, and more resilient. We leverage automation, robotics, and machine learning to streamline global operations, which radically increases processing speed while reducing risk, ensuring the entire system runs at peak performance."
-Pillar_3_Directive,"Power Our Culture"
-Pillar_3_Action_Detail,"This directive unifies the flight crew. We foster a 'one team' culture of engineers, data scientists, financial experts, and security specialists. Every member is dedicated to the success and absolute safety of every single client mission."
-Chart_Title,"BNY's Mission-Critical Blueprint"
-Chart_Data_CSV,"Pillar 1: Smart Tools for Clients,Pillar 2: Peak Operational Efficiency,Pillar 3: Unified Expert Team"
+Create a clear, engaging, and easy-to-understand 200-word summary explaining BNY's business, highlighting its strategic pillars and cultural principles. Include:
 
+1. **Simple Explanations:** Clearly outline the three strategic pillars:
+
+   * **Be More for Clients**: What actions BNY takes to deepen client relationships.
+   * **Run the Company Better**: How BNY enhances operational efficiency and agility.
+   * **Power Our Culture**: Methods BNY employs to build a strong, inclusive culture.
+
+2. **Visual Chart:** Provide a concise, easy-to-read table summarizing the strategic pillars, associated cultural principles, and business outcomes.
+
+3. **Creative Explanation:** Offer a captivating analogy or engaging story (such as comparing BNY to a superhero team, sports team, or a fun board game scenario) that creatively illustrates what BNY does, emphasizing its commitment to innovation, competitiveness, risk management, and implementation viability.
+
+The response must:
+
+* Clearly demonstrate BNY’s commitment to innovation and competitiveness through practical examples.
+* Highlight effective risk management and compliance strategies.
+* Showcase clarity and practicality (implementation viability).
+
+Make sure the summary is accessible to someone unfamiliar with finance or banking, ensuring clarity of idea throughout.
