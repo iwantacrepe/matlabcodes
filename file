@@ -1,48 +1,13 @@
-Using BNY Mellon’s 2024 Annual Report, generate a high-school-friendly explanation of what BNY does, in a format that would score well on the following evaluation criteria:
-
-Be More for Clients
-
-Run Company Better
-
-Power Our Culture
-
-Innovation and Competitiveness
-
-Risk and Compliance
-
-Implementation Viability (present information in tables, charts, CSV formats)
-
-Clarity of Idea
-
-
-Your response should be structured in 5 parts, each concise, clear, and designed for a high school student to enjoy and understand:
-
-Part 1: Student-Friendly Summary (max 200 words)
-
-Explain what BNY Mellon is, who it serves, how much money it handles, and how it supports the global financial system. Use analogies or comparisons where helpful.
-
-Part 2: Strategic Pillars Table
-
-List and explain BNY’s 3 strategic pillars
-
-First show it in a simple table
-
-Then provide it in CSV format
-
-
-Part 3: Principles & Risk/Compliance Table
-
-Explain 4–5 of BNY’s core principles (e.g., integrity, client obsession, strength in diversity)
-
-Clearly show how they support risk management, leadership, and trust
-
-Use a table and also show CSV format
-
-
-Part 4: Creative Analogy
-
-Use an imaginative analogy that makes BNY relatable to high schoolers (e.g., superhero, school sports team, game master, orchestra conductor).
-
-Part 5: Pillars ↔ Principles Chart
-
-Connect each strategic pillar to 1–2 company principles or values in a simple visual chart or bullet format.
+Here is the best prompt crafted to meet the challenge criteria:
+Prompt:
+Act as an expert financial communicator skilled at making complex topics simple and engaging for teenagers.
+Your mission is to generate a 200-word summary explaining what the company BNY (The Bank of New York Mellon) does for a high school audience.
+Your response must seamlessly integrate the following four elements:
+ * A Creative Analogy: Begin with an engaging analogy to explain BNY's core business. Frame it as a "financial world librarian and locksmith." BNY doesn't own the books (assets), but it keeps a perfect catalog of who owns what, protects them in a high-tech vault, and ensures they are safely transferred when traded, just like a librarian manages and protects valuable books for a huge community.
+ * Strategic Pillars Explained: Clearly and simply explain BNY's three strategic pillars:
+   * Be More for Clients
+   * Run the Company Better
+   * Power Our Culture
+ * Simple Visualization: Create a simple Markdown chart that connects each pillar to a real-world goal that a student can understand.
+ * Cohesive Summary: Weave these elements together into a single, flowing summary under 200 words. The tone should be accessible and avoid jargon.
+The goal is to produce a clear, creative, and comprehensive overview of BNY in a brief format.
