@@ -1,20 +1,44 @@
-Using BNY Mellon’s 2024 Annual Report, generate a 200-word summary that explains what BNY Mellon does in a way that a high school student can easily understand.
+Using BNY Mellon’s 2024 Annual Report, generate a comprehensive yet simple summary of what BNY Mellon does, designed for high school students.
 
-1. Clearly describe BNY’s strategic pillars and guiding principles in simple terms (avoid jargon).
+Your response should be clear, engaging, and well-structured, broken into 5 sections as follows:
+
+Part 1: High-School Friendly Summary
+
+Write a ~200-word summary of BNY Mellon’s role in global finance
+
+Avoid jargon; explain terms like “assets under custody” and “investment management” in easy-to-understand language
+
+Mention key facts: 52.1 trillion USD in assets under custody, 2 trillion in assets under management, 90% of Fortune 100 served
 
 
-2. Include a basic chart or diagram to help visualize BNY’s key business areas or pillars.
+Part 2: Business Segments Table
+
+Create a table listing BNY’s three main business segments and the lines of business under each
+
+Present it first as a readable table, then provide the CSV version with headers
 
 
-3. Use a creative analogy—like a fun story, school-related comparison, or game—to describe how BNY Mellon works as a whole. Make it engaging and memorable for a high school audience.
+Part 3: Strategic Pillars Table
+
+List the three strategic pillars of BNY and explain each in 1–2 easy sentences
+
+Provide this as a readable table and a CSV version
 
 
+Part 4: Company Principles and Culture Table
 
-The tone should be educational, friendly, and engaging, like a cool teacher explaining finance.
-Structure your output in 3 sections:
+Highlight BNY’s cultural values and principles like client obsession, AI & innovation, talent development
 
-Part 1: The summary
+Use 4–5 rows max
 
-Part 2: The chart
+Provide both table and CSV version
 
-Part 3: The creative analogy
+
+Part 5: Creative Analogy for Students
+
+Create a fun and memorable analogy or story to explain what BNY does, like comparing BNY to a school backpack, superhero team, or air traffic control system for money
+
+Use friendly language and make it relatable to high school students
+
+
+Maintain a helpful and upbeat tone throughout, like a teacher making finance fun.
