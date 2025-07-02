@@ -1,124 +1,20 @@
-Great — here’s how you can simplify the 19 variables using a dictionary, pass it to the functions, unpack them inside the functions, and make them global for use across the module.
+Using BNY Mellon’s 2024 Annual Report, generate a 200-word summary that explains what BNY Mellon does in a way that a high school student can easily understand.
+
+1. Clearly describe BNY’s strategic pillars and guiding principles in simple terms (avoid jargon).
 
 
----
-
-✅ Step 1: Wrap All Variables in a Config Dictionary
-
-In your main script:
-
-import sys
-sys.path.append(DATA_DIR_VAR + '/scripts')
-
-from table_columns_comparison import main_table
-from view_columns_comparison import main_views
-
-config = {
-    "VERTICA_HOST": VERTICA_HOST,
-    "VERTICA_USER": VERTICA_USER,
-    "VERTICA_PASSWORD": VERTICA_PASSWORD,
-    "VERTICA_DB": VERTICA_DB,
-    "VERTICA_HOST_DEV": VERTICA_HOST_DEV,
-    "VERTICA_USER_DEV": VERTICA_USER_DEV,
-    "VERTICA_PASSWORD_DEV": VERTICA_PASSWORD_DEV,
-    "VERTICA_DB_DEV": VERTICA_DB_DEV,
-    "URL_SF": URL_SF,
-    "KEYTAB_FILE_SDL_SF": KEYTAB_FILE_SDL_SF,
-    "PASSWORD_SDL_SF": PASSWORD_SDL_SF,
-    "DB_SDL_SF": DB_SDL_SF,
-    "DB_SDL_SF_VW": DB_SDL_SF_VW,
-    "SCHEMA_SDL_SF": SCHEMA_SDL_SF,
-    "USER_SDL_SF": USER_SDL_SF,
-    "WAREHOUSE_SDL_SF": WAREHOUSE_SDL_SF,
-    "ROLE_SDL_SF": ROLE_SDL_SF,
-    "KEYTAB_DIR": KEYTAB_DIR,
-    "DATA_DIR_VAR": DATA_DIR_VAR
-}
-
-main_table(config)
-main_views(config)
+2. Include a basic chart or diagram to help visualize BNY’s key business areas or pillars.
 
 
----
-
-✅ Step 2: Unpack and Make Global in table_columns_comparison.py
-
-def main_table(config):
-    global VERTICA_HOST, VERTICA_USER, VERTICA_PASSWORD, VERTICA_DB
-    global VERTICA_HOST_DEV, VERTICA_USER_DEV, VERTICA_PASSWORD_DEV, VERTICA_DB_DEV
-    global URL_SF, KEYTAB_FILE_SDL_SF, PASSWORD_SDL_SF, DB_SDL_SF
-    global DB_SDL_SF_VW, SCHEMA_SDL_SF, USER_SDL_SF, WAREHOUSE_SDL_SF
-    global ROLE_SDL_SF, KEYTAB_DIR, DATA_DIR_VAR
-
-    VERTICA_HOST = config["VERTICA_HOST"]
-    VERTICA_USER = config["VERTICA_USER"]
-    VERTICA_PASSWORD = config["VERTICA_PASSWORD"]
-    VERTICA_DB = config["VERTICA_DB"]
-    VERTICA_HOST_DEV = config["VERTICA_HOST_DEV"]
-    VERTICA_USER_DEV = config["VERTICA_USER_DEV"]
-    VERTICA_PASSWORD_DEV = config["VERTICA_PASSWORD_DEV"]
-    VERTICA_DB_DEV = config["VERTICA_DB_DEV"]
-    URL_SF = config["URL_SF"]
-    KEYTAB_FILE_SDL_SF = config["KEYTAB_FILE_SDL_SF"]
-    PASSWORD_SDL_SF = config["PASSWORD_SDL_SF"]
-    DB_SDL_SF = config["DB_SDL_SF"]
-    DB_SDL_SF_VW = config["DB_SDL_SF_VW"]
-    SCHEMA_SDL_SF = config["SCHEMA_SDL_SF"]
-    USER_SDL_SF = config["USER_SDL_SF"]
-    WAREHOUSE_SDL_SF = config["WAREHOUSE_SDL_SF"]
-    ROLE_SDL_SF = config["ROLE_SDL_SF"]
-    KEYTAB_DIR = config["KEYTAB_DIR"]
-    DATA_DIR_VAR = config["DATA_DIR_VAR"]
-
-    # Your main_table logic here
+3. Use a creative analogy—like a fun story, school-related comparison, or game—to describe how BNY Mellon works as a whole. Make it engaging and memorable for a high school audience.
 
 
----
 
-✅ Step 3: Do the Same in view_columns_comparison.py
+The tone should be educational, friendly, and engaging, like a cool teacher explaining finance.
+Structure your output in 3 sections:
 
-def main_views(config):
-    global VERTICA_HOST, VERTICA_USER, VERTICA_PASSWORD, VERTICA_DB
-    global VERTICA_HOST_DEV, VERTICA_USER_DEV, VERTICA_PASSWORD_DEV, VERTICA_DB_DEV
-    global URL_SF, KEYTAB_FILE_SDL_SF, PASSWORD_SDL_SF, DB_SDL_SF
-    global DB_SDL_SF_VW, SCHEMA_SDL_SF, USER_SDL_SF, WAREHOUSE_SDL_SF
-    global ROLE_SDL_SF, KEYTAB_DIR, DATA_DIR_VAR
+Part 1: The summary
 
-    VERTICA_HOST = config["VERTICA_HOST"]
-    VERTICA_USER = config["VERTICA_USER"]
-    VERTICA_PASSWORD = config["VERTICA_PASSWORD"]
-    VERTICA_DB = config["VERTICA_DB"]
-    VERTICA_HOST_DEV = config["VERTICA_HOST_DEV"]
-    VERTICA_USER_DEV = config["VERTICA_USER_DEV"]
-    VERTICA_PASSWORD_DEV = config["VERTICA_PASSWORD_DEV"]
-    VERTICA_DB_DEV = config["VERTICA_DB_DEV"]
-    URL_SF = config["URL_SF"]
-    KEYTAB_FILE_SDL_SF = config["KEYTAB_FILE_SDL_SF"]
-    PASSWORD_SDL_SF = config["PASSWORD_SDL_SF"]
-    DB_SDL_SF = config["DB_SDL_SF"]
-    DB_SDL_SF_VW = config["DB_SDL_SF_VW"]
-    SCHEMA_SDL_SF = config["SCHEMA_SDL_SF"]
-    USER_SDL_SF = config["USER_SDL_SF"]
-    WAREHOUSE_SDL_SF = config["WAREHOUSE_SDL_SF"]
-    ROLE_SDL_SF = config["ROLE_SDL_SF"]
-    KEYTAB_DIR = config["KEYTAB_DIR"]
-    DATA_DIR_VAR = config["DATA_DIR_VAR"]
+Part 2: The chart
 
-    # Your main_views logic here
-
-
----
-
-✅ Benefits of This Approach
-
-Cleaner function signatures.
-
-All config values centralized.
-
-Easy to maintain and modify.
-
-Global access across the file (helpful in multi-function logic).
-
-
-Let me know if you want to switch to using a dataclass instead of a plain dict for even more structure.
-
+Part 3: The creative analogy
