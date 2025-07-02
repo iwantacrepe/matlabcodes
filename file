@@ -1,44 +1,48 @@
-Using BNY Mellon’s 2024 Annual Report, generate a comprehensive yet simple summary of what BNY Mellon does, designed for high school students.
+Using BNY Mellon’s 2024 Annual Report, generate a high-school-friendly explanation of what BNY does, in a format that would score well on the following evaluation criteria:
 
-Your response should be clear, engaging, and well-structured, broken into 5 sections as follows:
+Be More for Clients
 
-Part 1: High-School Friendly Summary
+Run Company Better
 
-Write a ~200-word summary of BNY Mellon’s role in global finance
+Power Our Culture
 
-Avoid jargon; explain terms like “assets under custody” and “investment management” in easy-to-understand language
+Innovation and Competitiveness
 
-Mention key facts: 52.1 trillion USD in assets under custody, 2 trillion in assets under management, 90% of Fortune 100 served
+Risk and Compliance
 
+Implementation Viability (present information in tables, charts, CSV formats)
 
-Part 2: Business Segments Table
-
-Create a table listing BNY’s three main business segments and the lines of business under each
-
-Present it first as a readable table, then provide the CSV version with headers
+Clarity of Idea
 
 
-Part 3: Strategic Pillars Table
+Your response should be structured in 5 parts, each concise, clear, and designed for a high school student to enjoy and understand:
 
-List the three strategic pillars of BNY and explain each in 1–2 easy sentences
+Part 1: Student-Friendly Summary (max 200 words)
 
-Provide this as a readable table and a CSV version
+Explain what BNY Mellon is, who it serves, how much money it handles, and how it supports the global financial system. Use analogies or comparisons where helpful.
 
+Part 2: Strategic Pillars Table
 
-Part 4: Company Principles and Culture Table
+List and explain BNY’s 3 strategic pillars
 
-Highlight BNY’s cultural values and principles like client obsession, AI & innovation, talent development
+First show it in a simple table
 
-Use 4–5 rows max
-
-Provide both table and CSV version
-
-
-Part 5: Creative Analogy for Students
-
-Create a fun and memorable analogy or story to explain what BNY does, like comparing BNY to a school backpack, superhero team, or air traffic control system for money
-
-Use friendly language and make it relatable to high school students
+Then provide it in CSV format
 
 
-Maintain a helpful and upbeat tone throughout, like a teacher making finance fun.
+Part 3: Principles & Risk/Compliance Table
+
+Explain 4–5 of BNY’s core principles (e.g., integrity, client obsession, strength in diversity)
+
+Clearly show how they support risk management, leadership, and trust
+
+Use a table and also show CSV format
+
+
+Part 4: Creative Analogy
+
+Use an imaginative analogy that makes BNY relatable to high schoolers (e.g., superhero, school sports team, game master, orchestra conductor).
+
+Part 5: Pillars ↔ Principles Chart
+
+Connect each strategic pillar to 1–2 company principles or values in a simple visual chart or bullet format.
