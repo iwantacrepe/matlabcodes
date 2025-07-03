@@ -1,52 +1,118 @@
-Craft a highly detailed, engaging, and visually clear 200-word summary of BNY's business that mirrors the depth, specificity, and structure of a winning annual report. Clearly present BNY's strategic pillars, cultural principles, unique innovations, and market leadership. Structure your summary into the following detailed, multi-point sections:
+def compare_view(view_name, config_df, sf_conn, vt_conn, vt_dev_conn, summary):
+    """Main function to compare data for a single view between Snowflake and Vertica."""
+    print(f"--- Starting comparison for view: {view_name} ---")
+    sub = config_df[config_df["Table Name"].str.casefold() == view_name.casefold()]
+    if (sub["Flag"].str.casefold() == "stage").any():
+        summary.append(f"View '{view_name}': Skipped (Flagged as 'stage')")
+        print(f"Skipping view '{view_name}' as it is flagged as 'stage'.")
+        return
 
-1. Be More for Clients:
+    key_cols = sub[sub["Flag"].str.casefold() == "key"]["Column Name"].tolist()
 
-What: Clearly define key strategic actions such as launching new commercial models, strategic acquisitions, and client-focused innovations.
+    if not key_cols:
+        summary.append(f"View '{view_name}': Skipped (No key columns defined in config)")
+        print(f"Skipping view '{view_name}' because no key columns were defined.")
+        return
 
-Why: Explain detailed, measurable impacts these actions have on client relationships, growth metrics, and client satisfaction.
+    # --- Get column metadata first ---
+    sf_cols = get_columns(sf_conn, view_name, dbtype="snowflake")
+    vt_cols = get_columns(vt_conn, view_name, dbtype="vertica")
+    all_cols = list(set(sf_cols + vt_cols))
+    all_cols_lower = {col.lower() for col in all_cols} # For case-insensitive checking
 
-How: Provide precise methods, such as centralized account planning, cross-functional teamwork, and solution bundling, demonstrating clear implementation viability.
+    sf_norm_map = {col.casefold(): col for col in sf_cols}
+    vt_norm_map = {col.casefold(): col for col in vt_cols}
+    common_norm = set(sf_norm_map.keys()) & set(vt_norm_map.keys())
+    common_cols = [sf_norm_map[n] for n in common_norm]
 
+    # --- Build the exclusion list safely ---
+    exclude_cols_from_config = sub[sub["Flag"].str.casefold() == "exclude"]["Column Name"].tolist()
+    default_exclude_cols = ["insrt_ts", "updt_ts"]
+    
+    # Combine potential columns for exclusion
+    potential_exclude_cols = list(set(exclude_cols_from_config + default_exclude_cols))
 
+    # **MODIFICATION**: Only keep exclude columns that actually exist in the view
+    final_exclude_cols = [col for col in potential_exclude_cols if col.lower() in all_cols_lower]
 
-2. Run the Company Better:
-
-What: Describe detailed operational improvements such as Platforms Operating Model, workflow digitization, AI integration, and technological investments.
-
-Why: Explain specific, quantifiable outcomes including cost savings, agility improvements, reduction of operational silos, and measurable efficiency gains.
-
-How: Detail practical steps taken like company-wide transformation initiatives, process simplifications, and targeted AI-driven enhancements.
-
-
-
-3. Power Our Culture:
-
-What: Precisely detail cultural initiatives such as brand modernization, increased early-career hiring, leadership development, and well-being investments.
-
-Why: Clearly explain measurable impacts on innovation, talent attraction, employee engagement, and retention.
-
-How: Specify exact practices including enhanced recruiting strategies, structured development programs, and wellness initiatives.
-
-
-
-4. Innovation & Competitiveness:
-
-Clearly highlight BNY's advanced AI solutions, specific digital innovations, and explicit examples demonstrating industry-leading competitiveness and innovation.
-
-
-
-5. Risk & Compliance:
-
-Explicitly detail robust governance strategies, compliance measures, continuous training programs, and the precise impact these practices have on stability and client trust.
-
-
-
-6. Future Outlook:
-
-Concisely outline BNY’s strategic vision for the future, including explicit, quantifiable growth objectives, innovation targets, and clear steps toward continued global leadership.
+    keys = resolve_columns(key_cols, all_cols, force_upper=True)
+    excludes = resolve_columns(final_exclude_cols, all_cols, force_upper=True) if final_exclude_cols else []
+    compare_cols = [col for col in common_cols if col.upper() not in keys + excludes]
+    
+    print(f"[DEBUG] Comparing {len(compare_cols)} columns for view '{view_name}'.")
+    print(f"[DEBUG] Final excluded columns: {excludes}")
 
 
+    # --- Filter logic ---
+    filter_cols = sub[sub["Flag"].str.casefold() == "filter"]["Column Name"].tolist()
+    filter_col = filter_cols[0] if filter_cols else None
+    
+    end_datetime_str = None
+    if filter_col:
+        end_datetime_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f"[INFO] Applying filter on column '{filter_col}' from '{START_DATETIME}' to '{end_datetime_str}'.")
 
+    # --- Batched fetching and comparison (remains the same) ---
+    def fetch_df_batch(conn, dbtype, limit, offset):
+        """Fetches a batch of data from the specified database view."""
+        cols_to_fetch = keys + compare_cols
+        col_str = ", ".join(f'"{c}"' for c in cols_to_fetch)
 
-Include a comprehensive, visually structured chart clearly summarizing each strategic pillar, cultural principle, and measurable business outcome. Ensure the summary is professional yet accessible, clearly understood by diverse audiences.
+        query = f'SELECT {col_str} FROM "{SCHEMA}"."{view_name}"'
+        if filter_col:
+            query += f' WHERE "{filter_col}" BETWEEN \'{START_DATETIME}\' AND \'{end_datetime_str}\''
+        order_by_str = ", ".join(f'"{k}"' for k in keys)
+        query += f' ORDER BY {order_by_str}'
+        query += f' LIMIT {limit} OFFSET {offset}'
+
+        with conn.cursor() as cur:
+            cur.execute(query)
+            columns = [desc[0].upper() for desc in cur.description] if cur.description else [c.upper() for c in cols_to_fetch]
+            return pd.DataFrame(cur.fetchall(), columns=columns)
+
+    offset = 0
+    mismatches_found_for_view = False
+    while True:
+        print(f"[INFO] Fetching batch for view '{view_name}' with offset {offset}...")
+        df_sf = fetch_df_batch(sf_conn, "snowflake", BATCH_SIZE, offset)
+        df_vt = fetch_df_batch(vt_conn, "vertica", BATCH_SIZE, offset)
+
+        if df_sf.empty and df_vt.empty:
+            print(f"[INFO] No more data to fetch for view '{view_name}'.")
+            break
+
+        df_sf = df_sf.add_suffix("_sf")
+        df_vt = df_vt.add_suffix("_vt")
+
+        merged = pd.merge(df_sf, df_vt,
+                          left_on=[f"{k}_sf" for k in keys],
+                          right_on=[f"{k}_vt" for k in keys],
+                          how='outer')
+
+        mismatches = compare_rows(merged, compare_cols, keys, view_name)
+
+        if mismatches:
+            mismatches_found_for_view = True
+            print(f"[!!] Found {len(mismatches)} mismatches in this batch. Writing to database.")
+
+            data_to_insert = [
+                (m['ViewName'], m['ColumnName'], m['ValueInVertica'], m['ValueInSnowflake'], m['Key'])
+                for m in mismatches
+            ]
+
+            insert_query = """
+                INSERT INTO ER1.vertica_snowflake_view_data_comparison
+                (view_name, column_name, value_in_vertica, value_in_snowflake, unique_key)
+                VALUES (%s, %s, %s, %s, %s)
+            """
+
+            with vt_dev_conn.cursor() as cur:
+                cur.executemany(insert_query, data_to_insert)
+
+        offset += BATCH_SIZE
+
+    if mismatches_found_for_view:
+        summary.append(f"View '{view_name}': Mismatches found and written to the database.")
+    else:
+        summary.append(f"View '{view_name}': No mismatches found.")
+    print(f"--- Finished comparison for view: {view_name} ---\n")
