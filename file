@@ -1,3 +1,162 @@
+import os
+import pandas as pd
+import snowflake.connector
+import vertica_python
+from dotenv import load_dotenv
+import time
+import psutil
+import threading
+import statistics
+from datetime import datetime
+
+# --- Pandas Display Options ---
+pd.set_option("display.max_rows", None)
+pd.set_option("display.max_columns", None)
+pd.set_option("display.width", None)
+pd.set_option("display.max_colwidth", None)
+
+# --- Environment and Global Settings ---
+load_dotenv()
+
+SCHEMA = "ER1"
+START_DATETIME = "2020-10-01 00:00:00"
+BATCH_SIZE = 100000
+
+# --- Connection Functions ---
+def connect_to_snowflake():
+    """Establishes a connection to Snowflake."""
+    return snowflake.connector.connect(
+        account=os.getenv("URL_SF").split("//")[-1].split(".snowflakecomputing.com")[0],
+        user=os.getenv("USER_SDL_SF"),
+        private_key_file=os.path.join(os.getenv("DATA_ROOT"), os.getenv("KEYTAB_FILE_SDL_SF")),
+        private_key_file_pwd=os.getenv("PASSWORD_SDL_SF"),
+        database=os.getenv("DB_SDL_SF_VW"),
+        schema=os.getenv("SCHEMA_SDL_SF"),
+        warehouse=os.getenv("WAREHOUSE_SDL_SF"),
+        role=os.getenv("ROLE_SDL_SF"),
+        authenticator="SNOWFLAKE_JWT"
+    )
+
+def connect_to_vertica():
+    """Establishes a connection to production Vertica."""
+    return vertica_python.connect(
+        host=os.getenv("VERTICA_HOST"),
+        port=int(os.getenv("VERTICA_PORT", 5433)),
+        user=os.getenv("VERTICA_USER"),
+        password=os.getenv("VERTICA_PASSWORD"),
+        database=os.getenv("VERTICA_DB"),
+        autocommit=True
+    )
+
+def connect_to_vertica_dev():
+    """Establishes a connection to development Vertica for logging mismatches."""
+    return vertica_python.connect(
+        host=os.getenv("VERTICA_HOST_DEV"),
+        port=int(os.getenv("VERTICA_PORT", 5433)),
+        user=os.getenv("VERTICA_USER_DEV"),
+        password=os.getenv("VERTICA_PASSWORD_DEV"),
+        database=os.getenv("VERTICA_DB_DEV"),
+        autocommit=True
+    )
+
+# --- Metadata and Helper Functions ---
+def get_columns(conn, object_name, dbtype="snowflake"):
+    """
+    Fetches column names for a given table or view from the database's information schema.
+    """
+    schema_filter = SCHEMA
+    object_filter = object_name
+
+    if dbtype == "snowflake":
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT column_name
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE table_schema = %s AND table_name = %s
+                ORDER BY ordinal_position
+            """, (schema_filter, object_filter))
+            return [r[0] for r in cur.fetchall()]
+    else:  # vertica
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT column_name
+                FROM v_catalog.view_columns
+                WHERE table_schema = %s AND table_name = %s
+                ORDER BY ordinal_position
+            """, (schema_filter, object_filter.lower()))
+            return [r[0] for r in cur.fetchall()]
+
+def resolve_columns(requested, actual, force_upper=False):
+    """Resolves requested column names against a list of actual column names, case-insensitively."""
+    resolved = []
+    actual_map = {col.casefold(): col for col in actual}
+    for col in requested:
+        if col.casefold() not in actual_map:
+            raise ValueError(f"Column '{col}' not found in the view's available columns.")
+        resolved_name = actual_map[col.casefold()]
+        if force_upper:
+            resolved_name = resolved_name.upper()
+        resolved.append(resolved_name)
+    return resolved
+
+def format_value(val):
+    """Formats a value for insertion into the results table."""
+    return "NULL" if pd.isna(val) else str(val)
+
+def is_empty(val):
+    """Checks if a value is null, NaN, or an empty string."""
+    return pd.isna(val) or str(val).strip() == ""
+
+# --- Core Comparison Logic ---
+def compare_rows(df, compare_cols, keys, view_name):
+    """Compares rows in a merged DataFrame and identifies mismatches."""
+    mismatches = []
+    for _, row in df.iterrows():
+        row_keys = ", ".join([
+            format_value(row.get(f"{k}_sf")) if not pd.isna(row.get(f"{k}_sf"))
+            else format_value(row.get(f"{k}_vt")) for k in keys
+        ])
+
+        # Check for rows that exist in one source but not the other
+        is_entirely_missing_in_vt = all(is_empty(row.get(f"{col}_vt")) for col in compare_cols) and any(not is_empty(row.get(f"{col}_sf")) for col in compare_cols)
+        is_entirely_missing_in_sf = all(is_empty(row.get(f"{col}_sf")) for col in compare_cols) and any(not is_empty(row.get(f"{col}_vt")) for col in compare_cols)
+
+        if is_entirely_missing_in_vt:
+            mismatches.append({
+                "ViewName": view_name, "ColumnName": "__KEY_MISSING__",
+                "ValueInVertica": "Missing in Vertica", "ValueInSnowflake": "Present",
+                "Key": row_keys
+            })
+            continue
+
+        if is_entirely_missing_in_sf:
+            mismatches.append({
+                "ViewName": view_name, "ColumnName": "__KEY_MISSING__",
+                "ValueInVertica": "Present", "ValueInSnowflake": "Missing in Snowflake",
+                "Key": row_keys
+            })
+            continue
+
+        # Compare individual column values for existing rows
+        for col in compare_cols:
+            val_sf = row.get(f"{col}_sf")
+            val_vt = row.get(f"{col}_vt")
+
+            if pd.isna(val_sf) and pd.isna(val_vt):
+                continue
+
+            if pd.isna(val_sf) != pd.isna(val_vt) or (
+                not pd.isna(val_sf) and not pd.isna(val_vt) and
+                str(val_sf).strip().casefold() != str(val_vt).strip().casefold()
+            ):
+                mismatches.append({
+                    "ViewName": view_name, "ColumnName": col,
+                    "ValueInVertica": format_value(val_vt)[:255] if val_vt is not None else "",
+                    "ValueInSnowflake": format_value(val_sf)[:255] if val_sf is not None else "",
+                    "Key": row_keys
+                })
+    return mismatches
+
 def compare_view(view_name, config_df, sf_conn, vt_conn, vt_dev_conn, summary):
     """Main function to compare data for a single view between Snowflake and Vertica."""
     print(f"--- Starting comparison for view: {view_name} ---")
@@ -7,67 +166,72 @@ def compare_view(view_name, config_df, sf_conn, vt_conn, vt_dev_conn, summary):
         print(f"Skipping view '{view_name}' as it is flagged as 'stage'.")
         return
 
-    key_cols = sub[sub["Flag"].str.casefold() == "key"]["Column Name"].tolist()
-
-    if not key_cols:
+    key_cols_from_config = sub[sub["Flag"].str.casefold() == "key"]["Column Name"].tolist()
+    if not key_cols_from_config:
         summary.append(f"View '{view_name}': Skipped (No key columns defined in config)")
         print(f"Skipping view '{view_name}' because no key columns were defined.")
         return
 
-    # --- Get column metadata first ---
+    # 1. Get and canonicalize column names to handle case differences
     sf_cols = get_columns(sf_conn, view_name, dbtype="snowflake")
     vt_cols = get_columns(vt_conn, view_name, dbtype="vertica")
-    all_cols = list(set(sf_cols + vt_cols))
+
+    # Create a canonical map, preferring Snowflake's casing to resolve any conflicts
+    canonical_map = {col.casefold(): col for col in vt_cols}
+    canonical_map.update({col.casefold(): col for col in sf_cols})
+    all_cols_canonical = list(canonical_map.values())
+    all_cols_casefolded = set(canonical_map.keys())
+
+    # 2. Handle excluded columns, including dynamic default columns
+    exclude_cols_from_config = sub[sub["Flag"].str.casefold() == "exclude"]["Column Name"].tolist()
+    default_exclude_cols = ["insrt_ts", "updt_ts"]
     
-    # **MODIFICATION**: Use casefold() for a robust, case-insensitive set of column names.
-    all_cols_casefolded = {col.casefold() for col in all_cols} 
+    # Only include default exclude columns if they actually exist in the view
+    existing_default_excludes = [
+        col for col in default_exclude_cols if col.casefold() in all_cols_casefolded
+    ]
+    if existing_default_excludes:
+        print(f"[INFO] Applying default excludes found in view: {', '.join(existing_default_excludes)}")
+
+    exclude_cols_to_resolve = list(set(exclude_cols_from_config + existing_default_excludes))
+    
+    # 3. Resolve key, exclude, and compare column lists
+    keys = resolve_columns(key_cols_from_config, all_cols_canonical, force_upper=True)
+    excludes = resolve_columns(exclude_cols_to_resolve, all_cols_canonical, force_upper=True) if exclude_cols_to_resolve else []
 
     sf_norm_map = {col.casefold(): col for col in sf_cols}
     vt_norm_map = {col.casefold(): col for col in vt_cols}
     common_norm = set(sf_norm_map.keys()) & set(vt_norm_map.keys())
-    common_cols = [sf_norm_map[n] for n in common_norm]
-
-    # --- Build the exclusion list safely ---
-    exclude_cols_from_config = sub[sub["Flag"].str.casefold() == "exclude"]["Column Name"].tolist()
-    default_exclude_cols = ["insrt_ts", "updt_ts"]
+    common_cols = [canonical_map[norm] for norm in common_norm] # Use canonical casing
     
-    potential_exclude_cols = list(set(exclude_cols_from_config + default_exclude_cols))
-
-    # **MODIFICATION**: Filter using the casefolded set for accurate matching.
-    final_exclude_cols = [col for col in potential_exclude_cols if col.casefold() in all_cols_casefolded]
-
-    keys = resolve_columns(key_cols, all_cols, force_upper=True)
-    excludes = resolve_columns(final_exclude_cols, all_cols, force_upper=True) if final_exclude_cols else []
     compare_cols = [col for col in common_cols if col.upper() not in keys + excludes]
-    
     print(f"[DEBUG] Comparing {len(compare_cols)} columns for view '{view_name}'.")
-    print(f"[DEBUG] Final excluded columns: {excludes}")
 
-
-    # --- Filter logic ---
+    # Handle time-based filtering
     filter_cols = sub[sub["Flag"].str.casefold() == "filter"]["Column Name"].tolist()
     filter_col = filter_cols[0] if filter_cols else None
-    
-    end_datetime_str = None
     if filter_col:
         end_datetime_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         print(f"[INFO] Applying filter on column '{filter_col}' from '{START_DATETIME}' to '{end_datetime_str}'.")
 
-    # --- Batched fetching and comparison (remains the same) ---
     def fetch_df_batch(conn, dbtype, limit, offset):
         """Fetches a batch of data from the specified database view."""
-        cols_to_fetch = keys + compare_cols
+        cols_to_fetch = resolve_columns(keys + compare_cols, all_cols_canonical, force_upper=False)
         col_str = ", ".join(f'"{c}"' for c in cols_to_fetch)
 
         query = f'SELECT {col_str} FROM "{SCHEMA}"."{view_name}"'
         if filter_col:
-            query += f' WHERE "{filter_col}" BETWEEN \'{START_DATETIME}\' AND \'{end_datetime_str}\''
+            # Resolve the specific casing for the filter column for the query
+            resolved_filter_col = resolve_columns([filter_col], all_cols_canonical)[0]
+            query += f' WHERE "{resolved_filter_col}" >= \'{START_DATETIME}\''
+            
         order_by_str = ", ".join(f'"{k}"' for k in keys)
         query += f' ORDER BY {order_by_str}'
         query += f' LIMIT {limit} OFFSET {offset}'
 
         with conn.cursor() as cur:
             cur.execute(query)
+            # Standardize column names to uppercase for consistent merging
             columns = [desc[0].upper() for desc in cur.description] if cur.description else [c.upper() for c in cols_to_fetch]
             return pd.DataFrame(cur.fetchall(), columns=columns)
 
@@ -81,32 +245,31 @@ def compare_view(view_name, config_df, sf_conn, vt_conn, vt_dev_conn, summary):
         if df_sf.empty and df_vt.empty:
             print(f"[INFO] No more data to fetch for view '{view_name}'.")
             break
-
+        
+        # Suffix columns to identify origin after merge
         df_sf = df_sf.add_suffix("_sf")
         df_vt = df_vt.add_suffix("_vt")
 
+        # Perform outer join to find records present in one source but not the other
         merged = pd.merge(df_sf, df_vt,
                           left_on=[f"{k}_sf" for k in keys],
                           right_on=[f"{k}_vt" for k in keys],
                           how='outer')
-
-        mismatches = compare_rows(merged, compare_cols, keys, view_name)
+        
+        mismatches = compare_rows(merged, [c.upper() for c in compare_cols], keys, view_name)
 
         if mismatches:
             mismatches_found_for_view = True
             print(f"[!!] Found {len(mismatches)} mismatches in this batch. Writing to database.")
-
             data_to_insert = [
                 (m['ViewName'], m['ColumnName'], m['ValueInVertica'], m['ValueInSnowflake'], m['Key'])
                 for m in mismatches
             ]
-
             insert_query = """
                 INSERT INTO ER1.vertica_snowflake_view_data_comparison
                 (view_name, column_name, value_in_vertica, value_in_snowflake, unique_key)
                 VALUES (%s, %s, %s, %s, %s)
             """
-
             with vt_dev_conn.cursor() as cur:
                 cur.executemany(insert_query, data_to_insert)
 
@@ -117,3 +280,97 @@ def compare_view(view_name, config_df, sf_conn, vt_conn, vt_dev_conn, summary):
     else:
         summary.append(f"View '{view_name}': No mismatches found.")
     print(f"--- Finished comparison for view: {view_name} ---\n")
+
+def main():
+    """Main function to orchestrate the comparison process."""
+    try:
+        config = pd.read_excel("test.xlsx")
+        required_cols = {"Table Name", "Flag", "Column Name"}
+        if not required_cols.issubset(config.columns):
+            raise ValueError("Excel config file must have columns: 'Table Name', 'Flag', 'Column Name'")
+    except FileNotFoundError:
+        print("Error: The configuration file 'test.xlsx' was not found.")
+        return
+    except ValueError as e:
+        print(f"Configuration Error: {e}")
+        return
+
+    views_to_compare = config["Table Name"].dropna().unique()
+    sf_conn, vt_conn, vt_dev_conn = None, None, None
+    summary = []
+
+    try:
+        sf_conn = connect_to_snowflake()
+        vt_conn = connect_to_vertica()
+        vt_dev_conn = connect_to_vertica_dev()
+
+        with vt_dev_conn.cursor() as cur:
+             print("Truncating destination table: ER1.vertica_snowflake_view_data_comparison")
+             cur.execute("TRUNCATE TABLE ER1.vertica_snowflake_view_data_comparison")
+             print("[DEBUG] Truncation finished.")
+
+        for view_name in views_to_compare:
+            compare_view(view_name, config, sf_conn, vt_conn, vt_dev_conn, summary)
+
+    except Exception as e:
+        print(f"\nAn unexpected error occurred: {e}")
+    finally:
+        print("Closing database connections.")
+        if sf_conn: sf_conn.close()
+        if vt_conn: vt_conn.close()
+        if vt_dev_conn: vt_dev_conn.close()
+
+    print("\n" + "="*15 + " Summary " + "="*15)
+    mismatches_found_overall = False
+    for line in summary:
+        print(line)
+        if "Mismatches found" in line:
+            mismatches_found_overall = True
+    print("="*39)
+
+    if mismatches_found_overall:
+        print("\nMismatch report has been saved to the Vertica table: ER1.vertica_snowflake_view_data_comparison")
+    else:
+        print("\nNo mismatches were found across any of the compared views.")
+
+if __name__ == "__main__":
+    process = psutil.Process(os.getpid())
+    cpu_percentages = []
+    memory_usages = []
+    monitoring = True
+
+    def monitor_resources():
+        """Monitors CPU and memory usage of the current process."""
+        while monitoring:
+            try:
+                cpu_percentages.append(psutil.cpu_percent(interval=0.1))
+                memory_usages.append(process.memory_info().rss / 1024 / 1024) # in MB
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                break
+            time.sleep(1)
+
+    monitor_thread = threading.Thread(target=monitor_resources, daemon=True)
+    monitor_thread.start()
+
+    start_time = time.time()
+    main()
+    end_time = time.time()
+    
+    monitoring = False
+    monitor_thread.join(timeout=2.0)
+    execution_time = end_time - start_time
+
+    print("\n" + "="*15 + " Performance Report " + "="*15)
+    print(f"Total Execution Time: {execution_time:.2f} seconds")
+
+    if cpu_percentages:
+        print(f"CPU Usage (%):")
+        print(f"  - Average: {statistics.mean(cpu_percentages):.2f}%")
+        print(f"  - Maximum: {max(cpu_percentages):.2f}%")
+
+    if memory_usages:
+        print(f"Memory Usage (MB):")
+        print(f"  - Average: {statistics.mean(memory_usages):.2f} MB")
+        print(f"  - Maximum: {max(memory_usages):.2f} MB")
+        print(f"  - Final: {memory_usages[-1]:.2f} MB" if memory_usages else "N/A")
+    print("="*48)
