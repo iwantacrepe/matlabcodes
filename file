@@ -18,7 +18,9 @@ def compare_view(view_name, config_df, sf_conn, vt_conn, vt_dev_conn, summary):
     sf_cols = get_columns(sf_conn, view_name, dbtype="snowflake")
     vt_cols = get_columns(vt_conn, view_name, dbtype="vertica")
     all_cols = list(set(sf_cols + vt_cols))
-    all_cols_lower = {col.lower() for col in all_cols} # For case-insensitive checking
+    
+    # **MODIFICATION**: Use casefold() for a robust, case-insensitive set of column names.
+    all_cols_casefolded = {col.casefold() for col in all_cols} 
 
     sf_norm_map = {col.casefold(): col for col in sf_cols}
     vt_norm_map = {col.casefold(): col for col in vt_cols}
@@ -29,11 +31,10 @@ def compare_view(view_name, config_df, sf_conn, vt_conn, vt_dev_conn, summary):
     exclude_cols_from_config = sub[sub["Flag"].str.casefold() == "exclude"]["Column Name"].tolist()
     default_exclude_cols = ["insrt_ts", "updt_ts"]
     
-    # Combine potential columns for exclusion
     potential_exclude_cols = list(set(exclude_cols_from_config + default_exclude_cols))
 
-    # **MODIFICATION**: Only keep exclude columns that actually exist in the view
-    final_exclude_cols = [col for col in potential_exclude_cols if col.lower() in all_cols_lower]
+    # **MODIFICATION**: Filter using the casefolded set for accurate matching.
+    final_exclude_cols = [col for col in potential_exclude_cols if col.casefold() in all_cols_casefolded]
 
     keys = resolve_columns(key_cols, all_cols, force_upper=True)
     excludes = resolve_columns(final_exclude_cols, all_cols, force_upper=True) if final_exclude_cols else []
