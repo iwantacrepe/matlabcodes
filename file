@@ -1,48 +1,28 @@
-Absolutely! Here’s the updated LinkedIn Experience description that starts with your role title and company name, followed by a clean and professional summary of your work:
+Absolutely! Here’s a refined, more sophisticated version of your LinkedIn experience description. It uses elevated language, emphasizes complexity and impact, and removes the simpler point about case-insensitive matching:
 
 
 ---
 
-✅ LinkedIn Experience Entry: BNY Mellon
+As an Asset Servicing Intern at Bank of New York Mellon, I played a key role in the enterprise-scale modernization of BNY’s data infrastructure by designing and implementing robust data migration, validation, and monitoring frameworks to support the transition from Vertica to Snowflake.
 
-Title:
-Asset Servicing Intern – Data Engineering
+Spearheaded the end-to-end data quality validation process across a complex network of over 500 interdependent tables and views, ensuring high-integrity schema alignment and granular row-level consistency.
 
-Company:
-Bank of New York Mellon
+Engineered a suite of dynamic Python-based automation scripts to programmatically generate and execute SQL for structural (DDL) comparison and deep content validation between legacy and modern data platforms.
 
-Location:
-On-site (India)
+Architected and deployed highly maintainable ETL pipelines using Pentaho Data Integration, leveraging shared services to support fault-tolerant, version-controlled, and scalable migration workflows.
 
-Duration:
-June 2025 – August 2025 (3 months)
+Developed a fully interactive Power BI dashboard for visual anomaly detection, enabling stakeholders to explore schema mismatches, null pattern anomalies, and transformation exceptions via intuitive drill-downs and filters.
 
-Description:
+Implemented an intelligent mismatch tracking system by writing discrepancies directly to Snowflake-hosted audit layers, delivering real-time QA insights and traceability across multiple pipeline executions.
 
-As an Asset Servicing Intern at Bank of New York Mellon, I contributed to the enterprise-wide modernization of BNY's data infrastructure by engineering solutions for large-scale data migration, validation, and reporting between Vertica and Snowflake environments.
-
-Key Responsibilities & Achievements:
-
-Led the data verification and validation efforts for migrating data across 500+ tables and views, ensuring both schema-level and row-level consistency.
-
-Developed dynamic Python scripts to auto-generate SQL for comparing DDL structures and validating data values between source (Vertica) and target (Snowflake).
-
-Designed and deployed ETL pipelines using Pentaho Data Integration, orchestrated through Pentaho Shared Services for seamless and repeatable migrations.
-
-Created an interactive Power BI dashboard to visualize schema mismatches, null discrepancies, and row-level anomalies with filter and drill-down capabilities.
-
-Implemented automated mismatch reporting by writing results directly into Snowflake-based audit tables, enabling end-to-end traceability and QA-friendly data review.
-
-Applied case-insensitive column matching and transformation logic to resolve naming inconsistencies and improve migration robustness.
-
-Worked closely with data engineers, QA teams, and product managers to streamline pipeline validation, enhance error detection, and improve reliability of production data flow.
+Collaborated cross-functionally with data engineers, QA analysts, and platform leads to refine error-handling strategies, optimize data flow orchestration, and ensure compliance with enterprise-grade data governance policies.
 
 
 Skills:
-Python · SQL · Pentaho Data Integration · Power BI · Snowflake · Vertica · Data Quality · ETL Pipelines · Data Warehousing · Automation · Data Engineering · Cross-functional Collaboration
+Python · SQL · Snowflake · Vertica · Pentaho Data Integration · Power BI · Data Quality Engineering · ETL Architecture · Data Migration Strategy · Cross-Team Collaboration · Enterprise Data Platforms
 
 
 ---
 
-Let me know if you'd like a 1-liner summary for the top section or a media section description for uploading visuals/screenshots on your LinkedIn profile.
+Let me know if you'd like a short one-liner for the top summary box or suggestions for adding media/projects.
 
