@@ -1,35 +1,17 @@
-with vt_dev_conn.cursor() as cur:
-    print("Deleting records older than 7 days from ER1.vertica_snowflake_table_data_comparison")
-    delete_query = """
-        DELETE FROM ER1.vertica_snowflake_table_data_comparison
-        WHERE INSRT_TS < CURRENT_TIMESTAMP - INTERVAL '7 days'
-    """
-    cur.execute(delete_query)
-    print("[DEBUG] Old data deletion finished.")
-
-
-
-
-try:
-    with vt_dev_conn.cursor() as cur:
-        # Deleting data older than 7 days instead of truncating the whole table.
-        # It assumes an 'insrt_ts' column of timestamp type exists in the table.
-        print("Deleting data older than 7 days from: ER1.vertica_snowflake_table_data_comparison")
-        
-        # Vertica's NOW() function gets the current transaction's timestamp.
-        # The INTERVAL '7 DAY' specifies the seven-day period.
-        delete_query = "DELETE FROM ER1.vertica_snowflake_table_data_comparison WHERE insrt_ts < NOW() - INTERVAL '7 DAY'"
-        
-        cur.execute(delete_query)
-        print(f"[DEBUG] Deleted {cur.rowcount} old rows.")
-
-    for table in tables_to_compare:
-        compare_table(table, config, sf_conn, vt_conn, vt_dev_conn, summary)
-
-except Exception as e:
-    print(f"\nAn unexpected error occurred: {e}")
-finally:
-    print("Closing database connections.")
-    sf_conn.close()
-    vt_conn.close()
-    vt_dev_conn.close()
+SELECT
+    v.table_schema AS schema_name,
+    v.table_name AS view_name,
+    COUNT(q.query_id) AS view_usage_count
+FROM
+    snowflake.account_usage.query_history q
+JOIN
+    er1.information_schema.views v
+    ON q.query_text ILIKE '%' || v.table_name || '%'
+WHERE
+    v.table_schema = 'ER1'
+GROUP BY
+    v.table_schema, v.table_name
+HAVING
+    COUNT(q.query_id) > 0
+ORDER BY
+    view_usage_count DESC;
