@@ -3,56 +3,37 @@
 #include <tuple>
 #include <climits>
 #include <algorithm>
+using namespace std;
 
-int calculateLowestPrice(int N, int M, std::vector<std::vector<int>>& droneRoutes, int src, int dest, int k) {
-    if (src == dest) {
-        return 0;
-    }
+int calculateLowestPrice(int N, int M, vector<vector<int>>& droneRoutes, int src, int dest, int k) {
+    vector<vector<pair<int,int>>> adj(N);
+    for (auto& r : droneRoutes)
+        adj[r[0]].emplace_back(r[1], r[2]);
 
-    std::vector<std::vector<std::pair<int, int>>> adj(N);
-    for (const auto& route : droneRoutes) {
-        adj[route[0]].push_back({route[1], route[2]});
-    }
-
-    std::priority_queue<std::tuple<int, int, int>, std::vector<std::tuple<int, int, int>>, std::greater<std::tuple<int, int, int>>> pq;
-
-    std::vector<std::vector<int>> dist(N, std::vector<int>(k + 2, INT_MAX));
+    vector<vector<int>> dist(N, vector<int>(k + 2, INT_MAX));
+    using State = tuple<int,int,int>;
+    priority_queue<State, vector<State>, greater<State>> pq;
 
     dist[src][0] = 0;
-    pq.push({0, src, 0});
+    pq.emplace(0, src, 0);
 
     while (!pq.empty()) {
-        auto [cost, u, edges] = pq.top();
+        auto [cost,u,used] = pq.top();
         pq.pop();
-
-        if (cost > dist[u][edges]) {
+        if (cost > dist[u][used] || used == k+1)
             continue;
-        }
-        
-        if (edges > k) {
-            continue;
-        }
-
-        for (auto& edge : adj[u]) {
-            int v = edge.first;
-            int price = edge.second;
-            int new_edges = edges + 1;
-
-            if (dist[u][edges] != INT_MAX && dist[u][edges] + price < dist[v][new_edges]) {
-                dist[v][new_edges] = dist[u][edges] + price;
-                pq.push({dist[v][new_edges], v, new_edges});
+        for (auto& [v,w] : adj[u]) {
+            int nc = cost + w, ne = used + 1;
+            if (nc < dist[v][ne]) {
+                dist[v][ne] = nc;
+                pq.emplace(nc, v, ne);
             }
         }
     }
 
-    int min_price = INT_MAX;
-    for (int i = 1; i <= k + 1; ++i) {
-        min_price = std::min(min_price, dist[dest][i]);
-    }
+    int best = INT_MAX;
+    for (int e = 1; e <= k+1; ++e)
+        best = min(best, dist[dest][e]);
 
-    if (min_price == INT_MAX) {
-        return -1;
-    }
-
-    return min_price;
+    return best == INT_MAX ? -1 : best;
 }
