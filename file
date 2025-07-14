@@ -1,25 +1,31 @@
-#include <vector>
-#include <algorithm>
+#include <bits/stdc++.h>
 using namespace std;
 
-int calculateLowestPrice(int N, int M, vector<vector<int>>& droneRoutes, int src, int dest, int k) {
-    const long long INF = 1e18; // A larger INF for long long
-    vector<long long> prev(N, INF), curr(N, INF);
-    prev[src] = 0;
-
-    // The loop runs k+1 times, for paths of length 0 to k+1 edges
-    for (int i = 0; i <= k; ++i) {
-        curr = prev;
-        for (auto& route : droneRoutes) {
-            int u = route[0];
-            int v = route[1];
-            int w = route[2];
-            if (prev[u] < INF) {
-                curr[v] = min(curr[v], prev[u] + w);
+int pagesInCache(int X, int N, int page[]) {
+    vector<int> cacheList;
+    int hitCount = 0;
+    for (int i = 0; i < N; i++) {
+        int p = page[i];
+        auto it = find(cacheList.begin(), cacheList.end(), p);
+        if (it != cacheList.end()) {
+            hitCount++;
+            cacheList.erase(it);
+        }
+        cacheList.insert(cacheList.begin(), p);
+        if ((int)cacheList.size() > X) {
+            cacheList.pop_back();
+        }
+        for (int j = 0; j < X; j++) {
+            if (j > 0) {
+                cout << ' ';
+            }
+            if (j < (int)cacheList.size()) {
+                cout << cacheList[j];
+            } else {
+                cout << 0;
             }
         }
-        prev = curr; // Use simple assignment, swap is fine too.
+        cout << '\n';
     }
-
-    return prev[dest] == INF ? -1 : prev[dest];
+    return (hitCount * 100) / N;
 }
