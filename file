@@ -1,1 +1,5 @@
-SELECT 'VIEW_NAME' AS view_name, COUNT(*) AS row_count FROM er1.VIEW_NAME
+SELECT LISTAGG(
+    'SELECT ''' || table_name || ''' AS view_name, COUNT(*) AS row_count FROM ER1.' || table_name || ' HAVING COUNT(*) > 0',
+    ' UNION ALL '
+) AS full_query
+FROM ER1.information_schema.views;
