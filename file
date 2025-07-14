@@ -1,56 +1,25 @@
 #include <vector>
-#include <queue>
-#include <tuple>
-#include <climits>
+#include <algorithm>
+using namespace std;
 
-int calculateLowestPrice(int N, int M, std::vector<std::vector<int>>& droneRoutes, int src, int dest, int k) {
-    std::vector<std::pair<int, int>> adj[N];
-    for (const auto& route : droneRoutes) {
-        adj[route[0]].push_back({route[1], route[2]});
-    }
+int calculateLowestPrice(int N, int M, vector<vector<int>>& droneRoutes, int src, int dest, int k) {
+    const long long INF = 1e18; // A larger INF for long long
+    vector<long long> prev(N, INF), curr(N, INF);
+    prev[src] = 0;
 
-    std::priority_queue<std::tuple<int, int, int>, std::vector<std::tuple<int, int, int>>, std::greater<std::tuple<int, int, int>>> pq;
-
-    std::vector<std::vector<int>> dist(N, std::vector<int>(k + 2, INT_MAX));
-
-    dist[src][0] = 0;
-    pq.push({0, src, 0});
-
-    while (!pq.empty()) {
-        auto [cost, u, edges] = pq.top();
-        pq.pop();
-
-        if (cost > dist[u][edges]) {
-            continue;
-        }
-
-        if (edges >= k + 1) {
-            continue;
-        }
-
-        for (auto& edge : adj[u]) {
-            int v = edge.first;
-            int price = edge.second;
-            int new_edges = edges + 1;
-
-            if (dist[u][edges] != INT_MAX && dist[u][edges] + price < dist[v][new_edges]) {
-                dist[v][new_edges] = dist[u][edges] + price;
-                pq.push({dist[v][new_edges], v, new_edges});
+    // The loop runs k+1 times, for paths of length 0 to k+1 edges
+    for (int i = 0; i <= k; ++i) {
+        curr = prev;
+        for (auto& route : droneRoutes) {
+            int u = route[0];
+            int v = route[1];
+            int w = route[2];
+            if (prev[u] < INF) {
+                curr[v] = min(curr[v], prev[u] + w);
             }
         }
+        prev = curr; // Use simple assignment, swap is fine too.
     }
 
-    int min_price = INT_MAX;
-    for (int i = 0; i <= k + 1; ++i) {
-        min_price = std::min(min_price, dist[dest][i]);
-    }
-
-    if (min_price == INT_MAX) {
-        // The problem description is ambiguous about the return value for "No route".
-        // Given the integer return type, -1 is a standard indicator for "not found".
-        // The calling environment would be expected to interpret this.
-        return -1; 
-    }
-
-    return min_price;
+    return prev[dest] == INF ? -1 : prev[dest];
 }
