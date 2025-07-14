@@ -1,17 +1,1 @@
-SELECT
-    v.table_schema AS schema_name,
-    v.table_name AS view_name,
-    COUNT(q.query_id) AS view_usage_count
-FROM
-    snowflake.account_usage.query_history q
-JOIN
-    er1.information_schema.views v
-    ON q.query_text ILIKE '%' || v.table_name || '%'
-WHERE
-    v.table_schema = 'ER1'
-GROUP BY
-    v.table_schema, v.table_name
-HAVING
-    COUNT(q.query_id) > 0
-ORDER BY
-    view_usage_count DESC;
+SELECT 'VIEW_NAME' AS view_name, COUNT(*) AS row_count FROM er1.VIEW_NAME
