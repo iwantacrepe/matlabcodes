@@ -1,5 +1,7 @@
-SELECT LISTAGG(
-    'SELECT ''' || table_name || ''' AS view_name, COUNT(*) AS row_count FROM ER1.' || table_name || ' HAVING COUNT(*) > 0',
-    ' UNION ALL '
-) AS full_query
-FROM ER1.information_schema.views;
+DAYSOLD = 
+VAR LatestDate = CALCULATE(
+    MAX('table'[insrt_ts]),
+    ALL('table')
+)
+RETURN
+DATEDIFF('table'[insrt_ts], LatestDate, DAY)
