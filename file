@@ -1,31 +1,58 @@
-#include <bits/stdc++.h>
-using namespace std;
+#include <vector>
+#include <queue>
+#include <tuple>
+#include <climits>
+#include <algorithm>
 
-int pagesInCache(int X, int N, int page[]) {
-    vector<int> cacheList;
-    int hitCount = 0;
-    for (int i = 0; i < N; i++) {
-        int p = page[i];
-        auto it = find(cacheList.begin(), cacheList.end(), p);
-        if (it != cacheList.end()) {
-            hitCount++;
-            cacheList.erase(it);
-        }
-        cacheList.insert(cacheList.begin(), p);
-        if ((int)cacheList.size() > X) {
-            cacheList.pop_back();
-        }
-        for (int j = 0; j < X; j++) {
-            if (j > 0) {
-                cout << ' ';
-            }
-            if (j < (int)cacheList.size()) {
-                cout << cacheList[j];
-            } else {
-                cout << 0;
-            }
-        }
-        cout << '\n';
+int calculateLowestPrice(int N, int M, std::vector<std::vector<int>>& droneRoutes, int src, int dest, int k) {
+    if (src == dest) {
+        return 0;
     }
-    return (hitCount * 100) / N;
+
+    std::vector<std::vector<std::pair<int, int>>> adj(N);
+    for (const auto& route : droneRoutes) {
+        adj[route[0]].push_back({route[1], route[2]});
+    }
+
+    std::priority_queue<std::tuple<int, int, int>, std::vector<std::tuple<int, int, int>>, std::greater<std::tuple<int, int, int>>> pq;
+
+    std::vector<std::vector<int>> dist(N, std::vector<int>(k + 2, INT_MAX));
+
+    dist[src][0] = 0;
+    pq.push({0, src, 0});
+
+    while (!pq.empty()) {
+        auto [cost, u, edges] = pq.top();
+        pq.pop();
+
+        if (cost > dist[u][edges]) {
+            continue;
+        }
+        
+        if (edges > k) {
+            continue;
+        }
+
+        for (auto& edge : adj[u]) {
+            int v = edge.first;
+            int price = edge.second;
+            int new_edges = edges + 1;
+
+            if (dist[u][edges] != INT_MAX && dist[u][edges] + price < dist[v][new_edges]) {
+                dist[v][new_edges] = dist[u][edges] + price;
+                pq.push({dist[v][new_edges], v, new_edges});
+            }
+        }
+    }
+
+    int min_price = INT_MAX;
+    for (int i = 1; i <= k + 1; ++i) {
+        min_price = std::min(min_price, dist[dest][i]);
+    }
+
+    if (min_price == INT_MAX) {
+        return -1;
+    }
+
+    return min_price;
 }
