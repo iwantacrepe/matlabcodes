@@ -1,39 +1,47 @@
-#include <vector>
-#include <queue>
-#include <tuple>
-#include <climits>
-#include <algorithm>
-using namespace std;
+# upload.py
+import requests
+import os
+import json
 
-int calculateLowestPrice(int N, int M, vector<vector<int>>& droneRoutes, int src, int dest, int k) {
-    vector<vector<pair<int,int>>> adj(N);
-    for (auto& r : droneRoutes)
-        adj[r[0]].emplace_back(r[1], r[2]);
+UPLOADTHING_APP_ID = 'clipboard'
+UPLOADTHING_SECRET = 'eyJhcGlLZXkiOiJza19saXZlX2IzMDI1MWNhMGU5ZWIxYWMyOGY0MmI4YTliYzI4ZmMxNzg5YzRjNTY0ZjFkNWFkNmRiZjZjNGI3YzZhNzQ4NmUiLCJhcHBJZCI6InIxNnI0dGY0NnEiLCJyZWdpb25zIjpbInNlYTEiXX0='
+UPSTASH_REDIS_REST_URL = "https://apparent-buzzard-47270.upstash.io"
+UPSTASH_REDIS_REST_TOKEN = "AbimAAIjcDFkMTZmMGE2YWU5M2E0ODgzODJhNjE3NWY1NGQ5MmFkZnAxMA"
 
-    vector<vector<int>> dist(N, vector<int>(k + 2, INT_MAX));
-    using State = tuple<int,int,int>;
-    priority_queue<State, vector<State>, greater<State>> pq;
-
-    dist[src][0] = 0;
-    pq.emplace(0, src, 0);
-
-    while (!pq.empty()) {
-        auto [cost,u,used] = pq.top();
-        pq.pop();
-        if (cost > dist[u][used] || used == k+1)
-            continue;
-        for (auto& [v,w] : adj[u]) {
-            int nc = cost + w, ne = used + 1;
-            if (nc < dist[v][ne]) {
-                dist[v][ne] = nc;
-                pq.emplace(nc, v, ne);
+def upload_file(file_path):
+    file_name = os.path.basename(file_path)
+    print(f"Uploading {file_name}...")
+    
+    # Step 1: Get Upload URL from UploadThing
+    headers = {"Authorization": f"Bearer {UPLOADTHING_SECRET}"}
+    payload = {
+        "files": [
+            {
+                "name": file_name,
+                "size": os.path.getsize(file_path),
+                "type": "application/zip"
             }
-        }
+        ]
     }
+    res = requests.post(f"https://uploadthing.com/api/uploadFiles", json=payload, headers=headers)
+    res.raise_for_status()
+    upload_url = res.json()["data"]["urls"][0]["url"]
+    upload_res = requests.put(upload_url, data=open(file_path, "rb"))
+    upload_res.raise_for_status()
 
-    int best = INT_MAX;
-    for (int e = 1; e <= k+1; ++e)
-        best = min(best, dist[dest][e]);
+    # Public URL
+    file_key = res.json()["data"]["urls"][0]["key"]
+    public_url = f"https://utfs.io/f/{file_key}"
+    print("Uploaded to:", public_url)
 
-    return best == INT_MAX ? -1 : best;
-}
+    # Step 2: Store URL in Redis
+    redis_res = requests.post(
+        f"{UPSTASH_REDIS_REST_URL}/set",
+        headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
+        params={"_key": "latest_zip_url", "_value": public_url}
+    )
+    print("Stored URL in Redis:", redis_res.text)
+
+if __name__ == "__main__":
+    zip_path = input("Enter full path to .zip file: ")
+    upload_file(zip_path)
