@@ -1,130 +1,56 @@
-Here's the final correct setup to implement a Power BI slicer that filters rows based on how many days old they are from the latest insrt_ts value.
+Crystal clear now, Vaibhav ✅
 
-Your goal:
+You want a single DAX query — no extra column, no extra table — that you can use directly in a slicer or table visual to show only the distinct date part of your insrt_ts column (i.e., without the time).
 
-> Show a dropdown (1–7), and when a number is selected, only rows exactly that many days older than the latest insrt_ts date are shown.
 
+---
+
+✅ Final One-Liner DAX (No extra column/table)
+
+Here’s the single DAX expression that returns only the unique dates (without time) as strings, perfect for slicers or visuals:
+
+VALUES( FORMAT('table'[insrt_ts], "yyyy-mm-dd") )
+
+or for Indian format:
+
+VALUES( FORMAT('table'[insrt_ts], "dd/mm/yyyy") )
+
+
+---
+
+🎯 How to Use
+
+1. Go to a slicer or table visual
+
+
+2. In the field pane, don’t drag insrt_ts — instead:
+
+
+3. Click “Add a new measure” if using a card, or use this directly in the visual formula bar (if supported)
+
+
+4. Or, just create a table visual and in the formula bar write:
+
+
+
+EVALUATE VALUES( FORMAT('table'[insrt_ts], "dd/mm/yyyy") )
+
+This gives you a dynamic list of unique string-formatted dates from the insrt_ts column.
+
+
+---
+
+🧠 Why This Works
+
+FORMAT(...) removes the time
+
+VALUES(...) gives you distinct results only
+
+No need to predefine anything — works on the fly
 
 
 
 ---
 
-✅ Final Setup (Step-by-Step with Correct DAX)
-
-
----
-
-🔹 Step 1: Create a Calculated Column
-
-Name: DaysOld
-Type: Calculated column in your main table (table)
-
-DaysOld = 
-VAR currentDate = CALCULATE(MIN('table'[insrt_ts]))
-VAR latestDate = CALCULATE(MAX('table'[insrt_ts]), ALL('table'))
-RETURN
-DATEDIFF(currentDate, latestDate, DAY)
-
-✅ What it does: For each row, it calculates how many days old it is from the latest date in the table.
-
-
----
-
-🔹 Step 2: Create a Day Filter Table for the Slicer
-
-Name: DayFilterTable
-Type: New table (Modeling → New Table)
-
-DayFilterTable = GENERATESERIES(1, 7, 1)
-
-✅ What it does: Creates a list of numbers 1 to 7 to use in a slicer.
-
-
----
-
-🔹 Step 3: Create a Filter Measure
-
-Name: FilteredCount
-Type: Measure (Modeling → New Measure)
-
-FilteredCount = 
-VAR selectedDay = SELECTEDVALUE(DayFilterTable[Value])
-RETURN
-CALCULATE(
-    COUNTROWS('table'),
-    FILTER(
-        'table',
-        'table'[DaysOld] = selectedDay
-    )
-)
-
-✅ What it does: Returns count of rows that are exactly N days old (where N is selected from the slicer).
-
-
----
-
-🖼️ Final Visualization Setup in Power BI
-
-1. Add a Slicer
-
-Field: DayFilterTable[Value]
-
-Slicer format: Dropdown
-
-
-This gives the user options 1 through 7.
-
-
----
-
-2. To Filter a Table Visual:
-
-Add your data table to a visual.
-
-Apply a visual-level filter:
-
-'table'[DaysOld] is equal to DayFilterTable[Value]
-
-
-
-This will dynamically show only the rows that match the selected number of days old.
-
-
----
-
-3. To Show a Count or KPI Card:
-
-Add a Card visual
-
-Drag the FilteredCount measure
-
-
-It will show the number of rows matching the selected day difference.
-
-
----
-
-✅ Summary of Components
-
-Name	Type	Purpose
-
-DaysOld	Calculated Column	Calculates how many days old each row is
-DayFilterTable	Table	Provides dropdown values 1–7 for slicer
-FilteredCount	Measure	Counts rows that match selected DaysOld value
-Slicer	Visual	Selects value from 1–7 to filter the data
-Table/Matrix	Visual	Displays rows filtered by DaysOld
-Card	Visual	Displays row count via FilteredCount
-
-
-
----
-
-Let me know if you want to enhance this further by:
-
-Showing “Today”, “Yesterday”, “3 Days Ago” instead of plain numbers.
-
-Supporting “Older than 7 days” as a slicer option too.
-
-Showing date labels dynamically.
-
+Let me know if you'd like this sorted descending or filtered for "last 7 days" — that can also be done inline!
 
