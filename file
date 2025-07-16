@@ -4,7 +4,7 @@ import snowflake.connector
 import vertica_python
 from dotenv import load_dotenv
 
-# --- Pre-computation Setup ---
+# --- Configuration & Setup ---
 pd.set_option("display.max_rows", None)
 pd.set_option("display.max_columns", None)
 pd.set_option("display.width", None)
@@ -12,13 +12,17 @@ pd.set_option("display.max_colwidth", None)
 
 load_dotenv()
 SCHEMA = os.getenv("ER1_SCHEMA", "ER1")
-OUTPUT_FILE = "database_datatype_comparison.xlsx"
+OUTPUT_FILE = "view_datatype_comparison.xlsx"
 
 # --- Helper Functions ---
 def normalize(name: str) -> str:
-    """Returns a case-insensitive version of a string."""
-    # Vertica types can have parameters (e.g., VARCHAR(255)), normalize them for basic comparison
-    return str(name).casefold().split('(')[0]
+    """
+    Returns a case-insensitive and simplified version of a string.
+    Useful for comparing data types like 'VARCHAR(50)' and 'varchar'.
+    """
+    if not isinstance(name, str):
+        return str(name)
+    return name.casefold().split('(')[0].strip()
 
 # --- Connection Functions (Reused from your script) ---
 def connect_to_snowflake():
@@ -30,7 +34,7 @@ def connect_to_snowflake():
             user=os.getenv("USER_SDL_SF"),
             private_key_file=os.path.join(os.getenv("DATA_ROOT"), os.getenv("KEYTAB_FILE_SDL_SF")),
             private_key_file_pwd=os.getenv("PASSWORD_SDL_SF"),
-            database=os.getenv("DB_SDL_SF"),
+            database=os.getenv("DB_SDL_SF_VW"),
             schema=os.getenv("SCHEMA_SDL_SF"),
             warehouse=os.getenv("WAREHOUSE_SDL_SF"),
             role=os.getenv("ROLE_SDL_SF"),
@@ -60,21 +64,21 @@ def connect_to_vertica():
         print(f"❌ Error connecting to source Vertica: {e}")
         raise
 
-# --- Metadata Fetching Functions ---
-def get_snowflake_tables(conn, schema_name):
-    """Fetches table names from Snowflake."""
+# --- Metadata Fetching Functions (Modified for Data Types) ---
+def get_snowflake_views(conn, schema_name):
+    """Fetches view names from Snowflake."""
     with conn.cursor() as cur:
-        cur.execute(f"SELECT table_name FROM INFORMATION_SCHEMA.TABLES WHERE table_schema = %s", (schema_name,))
+        cur.execute("SELECT table_name FROM INFORMATION_SCHEMA.VIEWS WHERE table_schema = %s", (schema_name,))
         return [row[0] for row in cur.fetchall()]
 
-def get_vertica_tables(conn, schema_name):
-    """Fetches table names from Vertica."""
+def get_vertica_views(conn, schema_name):
+    """Fetches view names from Vertica."""
     with conn.cursor() as cur:
-        cur.execute(f"SELECT table_name FROM v_catalog.tables WHERE table_schema = %s", (schema_name,))
+        cur.execute("SELECT table_name FROM v_catalog.views WHERE table_schema = %s", (schema_name,))
         return [row[0] for row in cur.fetchall()]
 
-def get_snowflake_metadata(conn, schema_name, table_name):
-    """Fetches column names and data types for a table from Snowflake."""
+def get_snowflake_view_metadata(conn, schema_name, view_name):
+    """Fetches column names and data types for a given view from Snowflake."""
     query = """
         SELECT column_name, data_type
         FROM INFORMATION_SCHEMA.COLUMNS
@@ -82,23 +86,22 @@ def get_snowflake_metadata(conn, schema_name, table_name):
         ORDER BY ordinal_position;
     """
     with conn.cursor() as cur:
-        cur.execute(query, (schema_name, table_name))
+        cur.execute(query, (schema_name, view_name))
         # Returns a map of {normalized_col_name: (OriginalColName, OriginalDataType)}
-        return {normalize(col): (col, dtype) for col, dtype in cur.fetchall()}
+        return {col.casefold(): (col, dtype) for col, dtype in cur.fetchall()}
 
-def get_vertica_metadata(conn, schema_name, table_name):
-    """Fetches column names and data types for a table from Vertica."""
+def get_vertica_view_metadata(conn, schema_name, view_name):
+    """Fetches column names and data types for a given view from Vertica."""
     query = """
         SELECT column_name, data_type
-        FROM v_catalog.columns
+        FROM v_catalog.view_columns
         WHERE table_schema = %s AND table_name = %s
         ORDER BY ordinal_position;
     """
     with conn.cursor() as cur:
-        cur.execute(query, (schema_name, table_name))
+        cur.execute(query, (schema_name, view_name))
         # Returns a map of {normalized_col_name: (OriginalColName, OriginalDataType)}
-        return {normalize(col): (col, dtype) for col, dtype in cur.fetchall()}
-
+        return {col.casefold(): (col, dtype) for col, dtype in cur.fetchall()}
 
 def main():
     sf_conn = None
@@ -110,29 +113,29 @@ def main():
         sf_conn = connect_to_snowflake()
         vt_conn = connect_to_vertica()
 
-        # Fetch table lists and find common tables
-        sf_tables = get_snowflake_tables(sf_conn, SCHEMA)
-        vt_tables = get_vertica_tables(vt_conn, SCHEMA)
+        # Fetch view lists and find common views
+        sf_views = get_snowflake_views(sf_conn, SCHEMA)
+        vt_views = get_vertica_views(vt_conn, SCHEMA)
 
-        sf_table_map = {normalize(t): t for t in sf_tables}
-        vt_table_map = {normalize(t): t for t in vt_tables}
+        sf_view_map = {v.casefold(): v for v in sf_views}
+        vt_view_map = {v.casefold(): v for v in vt_views}
 
-        common_tables_norm = sorted(set(sf_table_map.keys()).intersection(set(vt_table_map.keys())))
-        
-        print(f"\nFound {len(common_tables_norm)} common tables. Starting column data type comparison...")
-        
-        # --- Iterate through common tables and compare column data types ---
-        for i, norm_table in enumerate(common_tables_norm):
-            sf_table_name = sf_table_map[norm_table]
-            vt_table_name = vt_table_map[norm_table]
-            
-            print(f"  ({i+1}/{len(common_tables_norm)}) Comparing table: {sf_table_name}")
+        common_views_norm = sorted(set(sf_view_map.keys()).intersection(vt_view_map.keys()))
+
+        print(f"\nFound {len(common_views_norm)} common views. Starting column data type comparison...")
+
+        # --- Iterate through common views and compare column data types ---
+        for i, norm_view in enumerate(common_views_norm):
+            sf_view_name = sf_view_map[norm_view]
+            vt_view_name = vt_view_map[norm_view]
+
+            print(f"  ({i+1}/{len(common_views_norm)}) Comparing view: {sf_view_name}")
 
             # Fetch metadata (column names and data types)
-            sf_cols_meta = get_snowflake_metadata(sf_conn, SCHEMA, sf_table_name)
-            vt_cols_meta = get_vertica_metadata(vt_conn, SCHEMA, vt_table_name)
+            sf_cols_meta = get_snowflake_view_metadata(sf_conn, SCHEMA, sf_view_name)
+            vt_cols_meta = get_vertica_view_metadata(vt_conn, SCHEMA, vt_view_name)
 
-            # Get a superset of all unique column names from both databases
+            # Get a superset of all unique column names from both views
             all_columns_norm = sorted(set(sf_cols_meta.keys()) | set(vt_cols_meta.keys()))
 
             for norm_col in all_columns_norm:
@@ -144,11 +147,11 @@ def main():
                 sf_dtype = sf_meta[1] if sf_meta else 'N/A'
                 vt_dtype = vt_meta[1] if vt_meta else 'N/A'
 
-                # Compare data types (case-insensitive)
+                # Compare normalized data types
                 is_different = 0 if normalize(sf_dtype) == normalize(vt_dtype) else 1
 
                 comparison_results.append({
-                    "TableName": sf_table_name,
+                    "ViewName": sf_view_name,
                     "ColumnName": col_name,
                     "DataTypeInVertica": vt_dtype,
                     "DataTypeInSnowflake": sf_dtype,
@@ -157,7 +160,7 @@ def main():
 
         # --- Process and Export Results ---
         if not comparison_results:
-            print("\n✅ COMPARISON COMPLETE: No common tables found or tables have no columns.")
+            print("\n✅ COMPARISON COMPLETE: No common views found or views have no columns.")
             return
 
         final_df = pd.DataFrame(comparison_results)
@@ -178,7 +181,6 @@ def main():
         if sf_conn: sf_conn.close()
         if vt_conn: vt_conn.close()
         print("\nDatabase connections closed.")
-
 
 if __name__ == "__main__":
     # Ensure you have the necessary library for writing Excel files
