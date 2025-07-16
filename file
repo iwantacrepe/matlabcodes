@@ -1,104 +1,83 @@
-import os
-import pandas as pd
-import numpy as np
-import snowflake.connector
-import vertica_python
-from dotenv import load_dotenv
+To create a dropdown (slicer) in Power BI that shows values 1 through 7, and filters the data to show only rows exactly that many days old compared to the latest insrt_ts date, follow these steps:
 
-pd.set_option("display.max_rows", 200)
-pd.set_option("display.max_columns", 10)
-pd.set_option("display.width", 150)
 
-load_dotenv()
-SCHEMA = os.getenv("ER1_SCHEMA", "ER1")
-TABLE_NAME = "SNP_KEY_DEVELOPMENTS"
-PK_COLUMN = "DEVELOPMENT_ID"
-TIMESTAMP_COLUMN = "LASTMODIFIEDDATEUTC"
+---
 
-def connect_to_snowflake():
-    conn = snowflake.connector.connect(
-        account=os.getenv("URL_SF").split("//")[-1].split(".snowflakecomputing.com")[0],
-        user=os.getenv("USER_SDL_SF"),
-        private_key_file=os.path.join(os.getenv("DATA_ROOT"), os.getenv("KEYTAB_FILE_SDL_SF")),
-        private_key_file_pwd=os.getenv("PASSWORD_SDL_SF"),
-        database=os.getenv("DB_SDL_SF_VW"),
-        schema=os.getenv("SCHEMA_SDL_SF"),
-        warehouse=os.getenv("WAREHOUSE_SDL_SF"),
-        role=os.getenv("ROLE_SDL_SF"),
-        authenticator='SNOWFLAKE_JWT'
+✅ Step-by-Step Instructions:
+
+1. Create a calculated column: DaysOld
+
+Go to your table (let’s call it 'table') and add this calculated column:
+
+DaysOld = DATEDIFF('table'[insrt_ts], CALCULATE(MAX('table'[insrt_ts]), ALL('table'])), DAY)
+
+This computes how many days old each row is from the latest insrt_ts value in the table.
+
+
+
+---
+
+2. Create a separate table for slicer values: DayFilterTable
+
+This table will contain the numbers 1 to 7:
+
+DayFilterTable = GENERATESERIES(1, 7, 1)
+
+
+---
+
+3. Create a relationship (no join needed!)
+
+Do NOT create a relationship between DayFilterTable and your main 'table'. Instead, we’ll use this table only for filtering via a measure.
+
+
+---
+
+4. Create a measure: FilteredCount (or any measure you want to display)
+
+Example:
+
+FilteredCount = 
+VAR SelectedDay = SELECTEDVALUE(DayFilterTable[Value])
+RETURN
+CALCULATE(
+    COUNTROWS('table'),
+    FILTER(
+        'table',
+        DATEDIFF('table'[insrt_ts], CALCULATE(MAX('table'[insrt_ts]), ALL('table'])), DAY) = SelectedDay
     )
-    return conn
+)
 
-def connect_to_vertica():
-    conn = vertica_python.connect(
-        host=os.getenv("VERTICA_HOST"),
-        port=int(os.getenv("VERTICA_PORT", 5433)),
-        user=os.getenv("VERTICA_USER"),
-        password=os.getenv("VERTICA_PASSWORD"),
-        database=os.getenv("VERTICA_DB"),
-        autocommit=True,
-        session_label='pandas_vertica_fetch'
-    )
-    return conn
 
-def main():
-    sf_conn = None
-    vt_conn = None
+---
 
-    try:
-        sf_conn = connect_to_snowflake()
-        vt_conn = connect_to_vertica()
+5. Use a slicer on DayFilterTable[Value]
 
-        query = f"SELECT {PK_COLUMN}, {TIMESTAMP_COLUMN} FROM {SCHEMA}.{TABLE_NAME};"
+Add a slicer visual and select the DayFilterTable[Value] field.
 
-        sf_df = pd.read_sql(query, sf_conn)
-        sf_df.columns = [col.upper() for col in sf_df.columns]
-        vt_df = pd.read_sql(query, vt_conn)
-        vt_df.columns = [col.upper() for col in vt_df.columns]
+This will now show a dropdown from 1 to 7.
 
-        sf_df[TIMESTAMP_COLUMN] = pd.to_datetime(sf_df[TIMESTAMP_COLUMN], errors='coerce')
-        vt_df[TIMESTAMP_COLUMN] = pd.to_datetime(vt_df[TIMESTAMP_COLUMN], errors='coerce')
+When the user selects a number, only the data that is exactly that many days older than the latest insrt_ts will be shown in visuals where the FilteredCount measure is used.
 
-        sf_df[TIMESTAMP_COLUMN] = sf_df[TIMESTAMP_COLUMN].dt.tz_localize(None)
-        vt_df[TIMESTAMP_COLUMN] = vt_df[TIMESTAMP_COLUMN].dt.tz_localize(None)
 
-        sf_df.rename(columns={TIMESTAMP_COLUMN: f"{TIMESTAMP_COLUMN}_sf"}, inplace=True)
-        vt_df.rename(columns={TIMESTAMP_COLUMN: f"{TIMESTAMP_COLUMN}_vt"}, inplace=True)
 
-        merged_df = pd.merge(
-            sf_df,
-            vt_df,
-            on=PK_COLUMN,
-            how="outer"
-        )
+---
 
-        sf_col = f'{TIMESTAMP_COLUMN}_sf'
-        vt_col = f'{TIMESTAMP_COLUMN}_vt'
+✅ Optional: Apply Filter to Visual Table
 
-        mismatched_values = merged_df[sf_col] != merged_df[vt_col]
-        missing_in_sf = merged_df[sf_col].isnull()
-        missing_in_vt = merged_df[vt_col].isnull()
-        mismatches_df = merged_df[mismatched_values | missing_in_sf | missing_in_vt].copy()
+If you want to show filtered table rows, not counts:
 
-        conditions = [
-            (mismatches_df[sf_col].notnull()) & (mismatches_df[vt_col].notnull()),
-            mismatches_df[vt_col].isnull(),
-            mismatches_df[sf_col].isnull()
-        ]
-        choices = ['Value Mismatch', 'Missing in Vertica', 'Missing in Snowflake']
-        mismatches_df['MismatchReason'] = np.select(conditions, choices, default='Unknown')
+Use visual-level filters on your table or matrix.
 
-        output_cols = [PK_COLUMN, 'MismatchReason', sf_col, vt_col]
-        mismatches_df[output_cols].sort_values(by=[PK_COLUMN, 'MismatchReason']).to_excel("timestamp_mismatches.xlsx", index=False)
+Create a calculated column as shown in Step 1, and then add a visual filter like:
 
-    except Exception as e:
-        print(f"Error: {e}")
-    finally:
-        if sf_conn: sf_conn.close()
-        if vt_conn: vt_conn.close()
 
-if __name__ == "__main__":
-    if PK_COLUMN == "YOUR_PRIMARY_KEY":
-        print("Update the 'PK_COLUMN' variable before running.")
-    else:
-        main()
+'DaysOld' is equal to DayFilterTable[Value]
+
+This will dynamically filter rows based on the dropdown.
+
+
+---
+
+Let me know if you'd like to show this in a report page table or build a dynamic card, too.
+
