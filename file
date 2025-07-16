@@ -5,62 +5,41 @@ import snowflake.connector
 import vertica_python
 from dotenv import load_dotenv
 
-# --- Configuration & Setup ---
 pd.set_option("display.max_rows", 200)
 pd.set_option("display.max_columns", 10)
 pd.set_option("display.width", 150)
 
 load_dotenv()
 SCHEMA = os.getenv("ER1_SCHEMA", "ER1")
-
-# --- IMPORTANT: CONFIGURE THESE VARIABLES ---
 TABLE_NAME = "SNP_KEY_DEVELOPMENTS"
-# Replace 'YOUR_PRIMARY_KEY' with the actual primary key column of your table.
-PK_COLUMN = "DEVELOPMENT_ID" 
+PK_COLUMN = "DEVELOPMENT_ID"
 TIMESTAMP_COLUMN = "LASTMODIFIEDDATEUTC"
 
-
-# --- Connection Functions (Reused from your previous scripts) ---
 def connect_to_snowflake():
-    """Establishes a connection to the source Snowflake database."""
-    print("Connecting to source Snowflake...")
-    try:
-        conn = snowflake.connector.connect(
-            account=os.getenv("URL_SF").split("//")[-1].split(".snowflakecomputing.com")[0],
-            user=os.getenv("USER_SDL_SF"),
-            private_key_file=os.path.join(os.getenv("DATA_ROOT"), os.getenv("KEYTAB_FILE_SDL_SF")),
-            private_key_file_pwd=os.getenv("PASSWORD_SDL_SF"),
-            database=os.getenv("DB_SDL_SF_VW"),
-            schema=os.getenv("SCHEMA_SDL_SF"),
-            warehouse=os.getenv("WAREHOUSE_SDL_SF"),
-            role=os.getenv("ROLE_SDL_SF"),
-            authenticator='SNOWFLAKE_JWT'
-        )
-        print("✅ Source Snowflake connected.")
-        return conn
-    except Exception as e:
-        print(f"❌ Error connecting to source Snowflake: {e}")
-        raise
+    conn = snowflake.connector.connect(
+        account=os.getenv("URL_SF").split("//")[-1].split(".snowflakecomputing.com")[0],
+        user=os.getenv("USER_SDL_SF"),
+        private_key_file=os.path.join(os.getenv("DATA_ROOT"), os.getenv("KEYTAB_FILE_SDL_SF")),
+        private_key_file_pwd=os.getenv("PASSWORD_SDL_SF"),
+        database=os.getenv("DB_SDL_SF_VW"),
+        schema=os.getenv("SCHEMA_SDL_SF"),
+        warehouse=os.getenv("WAREHOUSE_SDL_SF"),
+        role=os.getenv("ROLE_SDL_SF"),
+        authenticator='SNOWFLAKE_JWT'
+    )
+    return conn
 
 def connect_to_vertica():
-    """Establishes a connection to the source Vertica database."""
-    print("Connecting to source Vertica...")
-    try:
-        conn = vertica_python.connect(
-            host=os.getenv("VERTICA_HOST"),
-            port=int(os.getenv("VERTICA_PORT", 5433)),
-            user=os.getenv("VERTICA_USER"),
-            password=os.getenv("VERTICA_PASSWORD"),
-            database=os.getenv("VERTICA_DB"),
-            autocommit=True,
-            # This helps ensure Vertica timestamps are interpreted correctly
-            session_label='pandas_vertica_fetch' 
-        )
-        print("✅ Source Vertica connected.")
-        return conn
-    except Exception as e:
-        print(f"❌ Error connecting to source Vertica: {e}")
-        raise
+    conn = vertica_python.connect(
+        host=os.getenv("VERTICA_HOST"),
+        port=int(os.getenv("VERTICA_PORT", 5433)),
+        user=os.getenv("VERTICA_USER"),
+        password=os.getenv("VERTICA_PASSWORD"),
+        database=os.getenv("VERTICA_DB"),
+        autocommit=True,
+        session_label='pandas_vertica_fetch'
+    )
+    return conn
 
 def main():
     sf_conn = None
@@ -70,59 +49,37 @@ def main():
         sf_conn = connect_to_snowflake()
         vt_conn = connect_to_vertica()
 
-        # --- 1. Fetch Data from Both Databases ---
-        print(f"\nFetching data from table '{TABLE_NAME}'...")
-        
         query = f"SELECT {PK_COLUMN}, {TIMESTAMP_COLUMN} FROM {SCHEMA}.{TABLE_NAME};"
 
-        print("  - Fetching from Snowflake...")
         sf_df = pd.read_sql(query, sf_conn)
-        sf_df.columns = [col.upper() for col in sf_df.columns] # Ensure consistent column casing
-        print(f"    Found {len(sf_df)} records in Snowflake.")
-
-        print("  - Fetching from Vertica...")
+        sf_df.columns = [col.upper() for col in sf_df.columns]
         vt_df = pd.read_sql(query, vt_conn)
-        vt_df.columns = [col.upper() for col in vt_df.columns] # Ensure consistent column casing
-        print(f"    Found {len(vt_df)} records in Vertica.")
+        vt_df.columns = [col.upper() for col in vt_df.columns]
 
-        # --- 2. Merge DataFrames ---
-        print(f"\nMerging data on Primary Key: '{PK_COLUMN}'...")
+        sf_df[TIMESTAMP_COLUMN] = pd.to_datetime(sf_df[TIMESTAMP_COLUMN], errors='coerce')
+        vt_df[TIMESTAMP_COLUMN] = pd.to_datetime(vt_df[TIMESTAMP_COLUMN], errors='coerce')
+
+        sf_df[TIMESTAMP_COLUMN] = sf_df[TIMESTAMP_COLUMN].dt.tz_localize(None)
+        vt_df[TIMESTAMP_COLUMN] = vt_df[TIMESTAMP_COLUMN].dt.tz_localize(None)
+
+        sf_df.rename(columns={TIMESTAMP_COLUMN: f"{TIMESTAMP_COLUMN}_sf"}, inplace=True)
+        vt_df.rename(columns={TIMESTAMP_COLUMN: f"{TIMESTAMP_COLUMN}_vt"}, inplace=True)
+
         merged_df = pd.merge(
             sf_df,
             vt_df,
             on=PK_COLUMN,
-            how="outer",
-            suffixes=('_sf', '_vt')
+            how="outer"
         )
 
-        # --- 3. Standardize Timestamps to UTC (The Core Solution) ---
-        print("Standardizing timestamps to UTC for comparison...")
-        
-        # Snowflake's TIMESTAMP_TZ is already timezone-aware. Convert it to UTC for a standard baseline.
         sf_col = f'{TIMESTAMP_COLUMN}_sf'
-        merged_df[sf_col] = pd.to_datetime(merged_df[sf_col], errors='coerce').dt.tz_convert('UTC')
-
-        # Vertica's TIMESTAMP is timezone-naive. We must *assume* it's stored in UTC and make it timezone-aware.
-        # tz_localize() assigns a timezone to naive timestamps.
         vt_col = f'{TIMESTAMP_COLUMN}_vt'
-        merged_df[vt_col] = pd.to_datetime(merged_df[vt_col], errors='coerce').dt.tz_localize('UTC')
-        
-        print("✅ Timestamps standardized.")
 
-        # --- 4. Compare Values and Identify Mismatches ---
-        print("Comparing values and identifying mismatches...")
-
-        # Create a boolean mask for mismatched values, handling NULLs (NaT)
         mismatched_values = merged_df[sf_col] != merged_df[vt_col]
-
-        # Identify rows missing from either source
         missing_in_sf = merged_df[sf_col].isnull()
         missing_in_vt = merged_df[vt_col].isnull()
-        
-        # Filter for any kind of mismatch
         mismatches_df = merged_df[mismatched_values | missing_in_sf | missing_in_vt].copy()
-        
-        # Add a column explaining the reason for the mismatch
+
         conditions = [
             (mismatches_df[sf_col].notnull()) & (mismatches_df[vt_col].notnull()),
             mismatches_df[vt_col].isnull(),
@@ -131,33 +88,17 @@ def main():
         choices = ['Value Mismatch', 'Missing in Vertica', 'Missing in Snowflake']
         mismatches_df['MismatchReason'] = np.select(conditions, choices, default='Unknown')
 
-        # --- 5. Display Results ---
-        if mismatches_df.empty:
-            print("\n🎉 SUCCESS: No mismatches found between Snowflake and Vertica.")
-        else:
-            print(f"\n🚨 FOUND {len(mismatches_df)} MISMATCHES! 🚨")
-            
-            # Reorder columns for clear output
-            output_cols = [
-                PK_COLUMN, 
-                'MismatchReason', 
-                f'{TIMESTAMP_COLUMN}_sf', 
-                f'{TIMESTAMP_COLUMN}_vt'
-            ]
-            print(mismatches_df[output_cols].sort_values(by='MismatchReason'))
-
+        output_cols = [PK_COLUMN, 'MismatchReason', sf_col, vt_col]
+        mismatches_df[output_cols].sort_values(by=[PK_COLUMN, 'MismatchReason']).to_excel("timestamp_mismatches.xlsx", index=False)
 
     except Exception as e:
-        print(f"\n❌ An unexpected error occurred: {e}")
+        print(f"Error: {e}")
     finally:
-        # Close all connections
         if sf_conn: sf_conn.close()
         if vt_conn: vt_conn.close()
-        print("\nDatabase connections closed.")
-
 
 if __name__ == "__main__":
     if PK_COLUMN == "YOUR_PRIMARY_KEY":
-        print("⛔️ STOP: Please update the 'PK_COLUMN' variable in the script before running.")
+        print("Update the 'PK_COLUMN' variable before running.")
     else:
         main()
