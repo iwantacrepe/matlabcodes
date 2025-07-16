@@ -1,30 +1,26 @@
 import os
 import pandas as pd
+import numpy as np
 import snowflake.connector
 import vertica_python
 from dotenv import load_dotenv
 
 # --- Configuration & Setup ---
-pd.set_option("display.max_rows", None)
-pd.set_option("display.max_columns", None)
-pd.set_option("display.width", None)
-pd.set_option("display.max_colwidth", None)
+pd.set_option("display.max_rows", 200)
+pd.set_option("display.max_columns", 10)
+pd.set_option("display.width", 150)
 
 load_dotenv()
 SCHEMA = os.getenv("ER1_SCHEMA", "ER1")
-OUTPUT_FILE = "view_datatype_comparison.xlsx"
 
-# --- Helper Functions ---
-def normalize(name: str) -> str:
-    """
-    Returns a case-insensitive and simplified version of a string.
-    Useful for comparing data types like 'VARCHAR(50)' and 'varchar'.
-    """
-    if not isinstance(name, str):
-        return str(name)
-    return name.casefold().split('(')[0].strip()
+# --- IMPORTANT: CONFIGURE THESE VARIABLES ---
+TABLE_NAME = "SNP_KEY_DEVELOPMENTS"
+# Replace 'YOUR_PRIMARY_KEY' with the actual primary key column of your table.
+PK_COLUMN = "DEVELOPMENT_ID" 
+TIMESTAMP_COLUMN = "LASTMODIFIEDDATEUTC"
 
-# --- Connection Functions (Reused from your script) ---
+
+# --- Connection Functions (Reused from your previous scripts) ---
 def connect_to_snowflake():
     """Establishes a connection to the source Snowflake database."""
     print("Connecting to source Snowflake...")
@@ -56,7 +52,9 @@ def connect_to_vertica():
             user=os.getenv("VERTICA_USER"),
             password=os.getenv("VERTICA_PASSWORD"),
             database=os.getenv("VERTICA_DB"),
-            autocommit=True
+            autocommit=True,
+            # This helps ensure Vertica timestamps are interpreted correctly
+            session_label='pandas_vertica_fetch' 
         )
         print("✅ Source Vertica connected.")
         return conn
@@ -64,115 +62,90 @@ def connect_to_vertica():
         print(f"❌ Error connecting to source Vertica: {e}")
         raise
 
-# --- Metadata Fetching Functions (Modified for Data Types) ---
-def get_snowflake_views(conn, schema_name):
-    """Fetches view names from Snowflake."""
-    with conn.cursor() as cur:
-        cur.execute("SELECT table_name FROM INFORMATION_SCHEMA.VIEWS WHERE table_schema = %s", (schema_name,))
-        return [row[0] for row in cur.fetchall()]
-
-def get_vertica_views(conn, schema_name):
-    """Fetches view names from Vertica."""
-    with conn.cursor() as cur:
-        cur.execute("SELECT table_name FROM v_catalog.views WHERE table_schema = %s", (schema_name,))
-        return [row[0] for row in cur.fetchall()]
-
-def get_snowflake_view_metadata(conn, schema_name, view_name):
-    """Fetches column names and data types for a given view from Snowflake."""
-    query = """
-        SELECT column_name, data_type
-        FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE table_schema = %s AND table_name = %s
-        ORDER BY ordinal_position;
-    """
-    with conn.cursor() as cur:
-        cur.execute(query, (schema_name, view_name))
-        # Returns a map of {normalized_col_name: (OriginalColName, OriginalDataType)}
-        return {col.casefold(): (col, dtype) for col, dtype in cur.fetchall()}
-
-def get_vertica_view_metadata(conn, schema_name, view_name):
-    """Fetches column names and data types for a given view from Vertica."""
-    query = """
-        SELECT column_name, data_type
-        FROM v_catalog.view_columns
-        WHERE table_schema = %s AND table_name = %s
-        ORDER BY ordinal_position;
-    """
-    with conn.cursor() as cur:
-        cur.execute(query, (schema_name, view_name))
-        # Returns a map of {normalized_col_name: (OriginalColName, OriginalDataType)}
-        return {col.casefold(): (col, dtype) for col, dtype in cur.fetchall()}
-
 def main():
     sf_conn = None
     vt_conn = None
-    comparison_results = []
 
     try:
-        # Establish database connections
         sf_conn = connect_to_snowflake()
         vt_conn = connect_to_vertica()
 
-        # Fetch view lists and find common views
-        sf_views = get_snowflake_views(sf_conn, SCHEMA)
-        vt_views = get_vertica_views(vt_conn, SCHEMA)
+        # --- 1. Fetch Data from Both Databases ---
+        print(f"\nFetching data from table '{TABLE_NAME}'...")
+        
+        query = f"SELECT {PK_COLUMN}, {TIMESTAMP_COLUMN} FROM {SCHEMA}.{TABLE_NAME};"
 
-        sf_view_map = {v.casefold(): v for v in sf_views}
-        vt_view_map = {v.casefold(): v for v in vt_views}
+        print("  - Fetching from Snowflake...")
+        sf_df = pd.read_sql(query, sf_conn)
+        sf_df.columns = [col.upper() for col in sf_df.columns] # Ensure consistent column casing
+        print(f"    Found {len(sf_df)} records in Snowflake.")
 
-        common_views_norm = sorted(set(sf_view_map.keys()).intersection(vt_view_map.keys()))
+        print("  - Fetching from Vertica...")
+        vt_df = pd.read_sql(query, vt_conn)
+        vt_df.columns = [col.upper() for col in vt_df.columns] # Ensure consistent column casing
+        print(f"    Found {len(vt_df)} records in Vertica.")
 
-        print(f"\nFound {len(common_views_norm)} common views. Starting column data type comparison...")
+        # --- 2. Merge DataFrames ---
+        print(f"\nMerging data on Primary Key: '{PK_COLUMN}'...")
+        merged_df = pd.merge(
+            sf_df,
+            vt_df,
+            on=PK_COLUMN,
+            how="outer",
+            suffixes=('_sf', '_vt')
+        )
 
-        # --- Iterate through common views and compare column data types ---
-        for i, norm_view in enumerate(common_views_norm):
-            sf_view_name = sf_view_map[norm_view]
-            vt_view_name = vt_view_map[norm_view]
+        # --- 3. Standardize Timestamps to UTC (The Core Solution) ---
+        print("Standardizing timestamps to UTC for comparison...")
+        
+        # Snowflake's TIMESTAMP_TZ is already timezone-aware. Convert it to UTC for a standard baseline.
+        sf_col = f'{TIMESTAMP_COLUMN}_sf'
+        merged_df[sf_col] = pd.to_datetime(merged_df[sf_col], errors='coerce').dt.tz_convert('UTC')
 
-            print(f"  ({i+1}/{len(common_views_norm)}) Comparing view: {sf_view_name}")
+        # Vertica's TIMESTAMP is timezone-naive. We must *assume* it's stored in UTC and make it timezone-aware.
+        # tz_localize() assigns a timezone to naive timestamps.
+        vt_col = f'{TIMESTAMP_COLUMN}_vt'
+        merged_df[vt_col] = pd.to_datetime(merged_df[vt_col], errors='coerce').dt.tz_localize('UTC')
+        
+        print("✅ Timestamps standardized.")
 
-            # Fetch metadata (column names and data types)
-            sf_cols_meta = get_snowflake_view_metadata(sf_conn, SCHEMA, sf_view_name)
-            vt_cols_meta = get_vertica_view_metadata(vt_conn, SCHEMA, vt_view_name)
+        # --- 4. Compare Values and Identify Mismatches ---
+        print("Comparing values and identifying mismatches...")
 
-            # Get a superset of all unique column names from both views
-            all_columns_norm = sorted(set(sf_cols_meta.keys()) | set(vt_cols_meta.keys()))
+        # Create a boolean mask for mismatched values, handling NULLs (NaT)
+        mismatched_values = merged_df[sf_col] != merged_df[vt_col]
 
-            for norm_col in all_columns_norm:
-                sf_meta = sf_cols_meta.get(norm_col)
-                vt_meta = vt_cols_meta.get(norm_col)
+        # Identify rows missing from either source
+        missing_in_sf = merged_df[sf_col].isnull()
+        missing_in_vt = merged_df[vt_col].isnull()
+        
+        # Filter for any kind of mismatch
+        mismatches_df = merged_df[mismatched_values | missing_in_sf | missing_in_vt].copy()
+        
+        # Add a column explaining the reason for the mismatch
+        conditions = [
+            (mismatches_df[sf_col].notnull()) & (mismatches_df[vt_col].notnull()),
+            mismatches_df[vt_col].isnull(),
+            mismatches_df[sf_col].isnull()
+        ]
+        choices = ['Value Mismatch', 'Missing in Vertica', 'Missing in Snowflake']
+        mismatches_df['MismatchReason'] = np.select(conditions, choices, default='Unknown')
 
-                # Extract details, using 'N/A' for missing elements
-                col_name = sf_meta[0] if sf_meta else vt_meta[0]
-                sf_dtype = sf_meta[1] if sf_meta else 'N/A'
-                vt_dtype = vt_meta[1] if vt_meta else 'N/A'
+        # --- 5. Display Results ---
+        if mismatches_df.empty:
+            print("\n🎉 SUCCESS: No mismatches found between Snowflake and Vertica.")
+        else:
+            print(f"\n🚨 FOUND {len(mismatches_df)} MISMATCHES! 🚨")
+            
+            # Reorder columns for clear output
+            output_cols = [
+                PK_COLUMN, 
+                'MismatchReason', 
+                f'{TIMESTAMP_COLUMN}_sf', 
+                f'{TIMESTAMP_COLUMN}_vt'
+            ]
+            print(mismatches_df[output_cols].sort_values(by='MismatchReason'))
 
-                # Compare normalized data types
-                is_different = 0 if normalize(sf_dtype) == normalize(vt_dtype) else 1
-
-                comparison_results.append({
-                    "ViewName": sf_view_name,
-                    "ColumnName": col_name,
-                    "DataTypeInVertica": vt_dtype,
-                    "DataTypeInSnowflake": sf_dtype,
-                    "IsDifferent": is_different
-                })
-
-        # --- Process and Export Results ---
-        if not comparison_results:
-            print("\n✅ COMPARISON COMPLETE: No common views found or views have no columns.")
-            return
-
-        final_df = pd.DataFrame(comparison_results)
-
-        print("\n=== COMPARISON COMPLETE ===")
-        print("Sample of results:")
-        print(final_df.head().to_string(index=False))
-
-        # Export DataFrame to Excel
-        print(f"\nWriting {len(final_df)} records to {OUTPUT_FILE}...")
-        final_df.to_excel(OUTPUT_FILE, index=False, engine='openpyxl')
-        print(f"✅ Successfully created Excel file: {os.path.abspath(OUTPUT_FILE)}")
 
     except Exception as e:
         print(f"\n❌ An unexpected error occurred: {e}")
@@ -182,11 +155,9 @@ def main():
         if vt_conn: vt_conn.close()
         print("\nDatabase connections closed.")
 
+
 if __name__ == "__main__":
-    # Ensure you have the necessary library for writing Excel files
-    try:
-        import openpyxl
-    except ImportError:
-        print("Module 'openpyxl' not found. Please install it using: pip install openpyxl")
+    if PK_COLUMN == "YOUR_PRIMARY_KEY":
+        print("⛔️ STOP: Please update the 'PK_COLUMN' variable in the script before running.")
     else:
         main()
