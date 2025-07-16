@@ -1,41 +1,55 @@
-To create a dropdown (slicer) in Power BI that shows values 1 through 7, and filters the data to show only rows exactly that many days old compared to the latest insrt_ts date, follow these steps:
+Here is the fully corrected step-by-step guide using proper DAX syntax for your Power BI setup:
 
 
 ---
 
-✅ Step-by-Step Instructions:
+🎯 Goal
 
-1. Create a calculated column: DaysOld
+Create a dropdown (1–7) that filters rows where insrt_ts is exactly that many days old from the latest insrt_ts value.
 
-Go to your table (let’s call it 'table') and add this calculated column:
 
-DaysOld = DATEDIFF('table'[insrt_ts], CALCULATE(MAX('table'[insrt_ts]), ALL('table'])), DAY)
+---
 
-This computes how many days old each row is from the latest insrt_ts value in the table.
+✅ Step 1: Convert insrt_ts to DateTime
+
+If insrt_ts is stored as text, create a new calculated column to convert it:
+
+insrt_ts_converted = VALUE('table'[insrt_ts])
+
+> This turns "7/2/2025 9:29:17 AM" into an actual datetime value usable in DATEDIFF.
+
 
 
 
 ---
 
-2. Create a separate table for slicer values: DayFilterTable
+✅ Step 2: Create the DaysOld column
 
-This table will contain the numbers 1 to 7:
+Now create another calculated column to get how many days old the record is compared to the latest timestamp:
+
+DaysOld = DATEDIFF(
+    'table'[insrt_ts_converted],
+    CALCULATE(MAX('table'[insrt_ts_converted]), ALL('table')),
+    DAY
+)
+
+
+---
+
+✅ Step 3: Create a supporting table for slicer
+
+Create a new table with values from 1 to 7 for the dropdown:
 
 DayFilterTable = GENERATESERIES(1, 7, 1)
 
-
----
-
-3. Create a relationship (no join needed!)
-
-Do NOT create a relationship between DayFilterTable and your main 'table'. Instead, we’ll use this table only for filtering via a measure.
+This acts as a filter input for selection.
 
 
 ---
 
-4. Create a measure: FilteredCount (or any measure you want to display)
+✅ Step 4: Create a measure to filter based on selection
 
-Example:
+Now add a measure that reflects the number of rows exactly that many days old:
 
 FilteredCount = 
 VAR SelectedDay = SELECTEDVALUE(DayFilterTable[Value])
@@ -44,40 +58,39 @@ CALCULATE(
     COUNTROWS('table'),
     FILTER(
         'table',
-        DATEDIFF('table'[insrt_ts], CALCULATE(MAX('table'[insrt_ts]), ALL('table'])), DAY) = SelectedDay
+        'table'[DaysOld] = SelectedDay
     )
 )
 
 
 ---
 
-5. Use a slicer on DayFilterTable[Value]
+✅ Step 5: Add Slicer and Visual
 
-Add a slicer visual and select the DayFilterTable[Value] field.
+1. Add a slicer visual → drag DayFilterTable[Value] into it.
 
-This will now show a dropdown from 1 to 7.
 
-When the user selects a number, only the data that is exactly that many days older than the latest insrt_ts will be shown in visuals where the FilteredCount measure is used.
+2. Use FilteredCount measure in any card/table/graph visual.
+
+
+3. Or apply DaysOld = SelectedDay as a visual-level filter to show matching rows only.
+
+
+
+
+---
+
+✅ Optional (for visual tables):
+
+If you want the actual rows (not counts) shown:
+
+Drag 'table' to a table visual.
+
+Add a visual-level filter: 'table'[DaysOld] = DayFilterTable[Value]
 
 
 
 ---
 
-✅ Optional: Apply Filter to Visual Table
-
-If you want to show filtered table rows, not counts:
-
-Use visual-level filters on your table or matrix.
-
-Create a calculated column as shown in Step 1, and then add a visual filter like:
-
-
-'DaysOld' is equal to DayFilterTable[Value]
-
-This will dynamically filter rows based on the dropdown.
-
-
----
-
-Let me know if you'd like to show this in a report page table or build a dynamic card, too.
+Let me know if you want to make it relative to today instead of max date, or show the label as “1 day ago”, “2 days ago”, etc.
 
