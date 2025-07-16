@@ -1,47 +1,190 @@
-# upload.py
-import requests
 import os
-import json
+import pandas as pd
+import snowflake.connector
+import vertica_python
+from dotenv import load_dotenv
 
-UPLOADTHING_APP_ID = 'clipboard'
-UPLOADTHING_SECRET = 'eyJhcGlLZXkiOiJza19saXZlX2IzMDI1MWNhMGU5ZWIxYWMyOGY0MmI4YTliYzI4ZmMxNzg5YzRjNTY0ZjFkNWFkNmRiZjZjNGI3YzZhNzQ4NmUiLCJhcHBJZCI6InIxNnI0dGY0NnEiLCJyZWdpb25zIjpbInNlYTEiXX0='
-UPSTASH_REDIS_REST_URL = "https://apparent-buzzard-47270.upstash.io"
-UPSTASH_REDIS_REST_TOKEN = "AbimAAIjcDFkMTZmMGE2YWU5M2E0ODgzODJhNjE3NWY1NGQ5MmFkZnAxMA"
+# --- Pre-computation Setup ---
+pd.set_option("display.max_rows", None)
+pd.set_option("display.max_columns", None)
+pd.set_option("display.width", None)
+pd.set_option("display.max_colwidth", None)
 
-def upload_file(file_path):
-    file_name = os.path.basename(file_path)
-    print(f"Uploading {file_name}...")
-    
-    # Step 1: Get Upload URL from UploadThing
-    headers = {"Authorization": f"Bearer {UPLOADTHING_SECRET}"}
-    payload = {
-        "files": [
-            {
-                "name": file_name,
-                "size": os.path.getsize(file_path),
-                "type": "application/zip"
-            }
-        ]
-    }
-    res = requests.post(f"https://uploadthing.com/api/uploadFiles", json=payload, headers=headers)
-    res.raise_for_status()
-    upload_url = res.json()["data"]["urls"][0]["url"]
-    upload_res = requests.put(upload_url, data=open(file_path, "rb"))
-    upload_res.raise_for_status()
+load_dotenv()
+SCHEMA = os.getenv("ER1_SCHEMA", "ER1")
+OUTPUT_FILE = "database_datatype_comparison.xlsx"
 
-    # Public URL
-    file_key = res.json()["data"]["urls"][0]["key"]
-    public_url = f"https://utfs.io/f/{file_key}"
-    print("Uploaded to:", public_url)
+# --- Helper Functions ---
+def normalize(name: str) -> str:
+    """Returns a case-insensitive version of a string."""
+    # Vertica types can have parameters (e.g., VARCHAR(255)), normalize them for basic comparison
+    return str(name).casefold().split('(')[0]
 
-    # Step 2: Store URL in Redis
-    redis_res = requests.post(
-        f"{UPSTASH_REDIS_REST_URL}/set",
-        headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
-        params={"_key": "latest_zip_url", "_value": public_url}
-    )
-    print("Stored URL in Redis:", redis_res.text)
+# --- Connection Functions (Reused from your script) ---
+def connect_to_snowflake():
+    """Establishes a connection to the source Snowflake database."""
+    print("Connecting to source Snowflake...")
+    try:
+        conn = snowflake.connector.connect(
+            account=os.getenv("URL_SF").split("//")[-1].split(".snowflakecomputing.com")[0],
+            user=os.getenv("USER_SDL_SF"),
+            private_key_file=os.path.join(os.getenv("DATA_ROOT"), os.getenv("KEYTAB_FILE_SDL_SF")),
+            private_key_file_pwd=os.getenv("PASSWORD_SDL_SF"),
+            database=os.getenv("DB_SDL_SF"),
+            schema=os.getenv("SCHEMA_SDL_SF"),
+            warehouse=os.getenv("WAREHOUSE_SDL_SF"),
+            role=os.getenv("ROLE_SDL_SF"),
+            authenticator='SNOWFLAKE_JWT'
+        )
+        print("✅ Source Snowflake connected.")
+        return conn
+    except Exception as e:
+        print(f"❌ Error connecting to source Snowflake: {e}")
+        raise
+
+def connect_to_vertica():
+    """Establishes a connection to the source Vertica database."""
+    print("Connecting to source Vertica...")
+    try:
+        conn = vertica_python.connect(
+            host=os.getenv("VERTICA_HOST"),
+            port=int(os.getenv("VERTICA_PORT", 5433)),
+            user=os.getenv("VERTICA_USER"),
+            password=os.getenv("VERTICA_PASSWORD"),
+            database=os.getenv("VERTICA_DB"),
+            autocommit=True
+        )
+        print("✅ Source Vertica connected.")
+        return conn
+    except Exception as e:
+        print(f"❌ Error connecting to source Vertica: {e}")
+        raise
+
+# --- Metadata Fetching Functions ---
+def get_snowflake_tables(conn, schema_name):
+    """Fetches table names from Snowflake."""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT table_name FROM INFORMATION_SCHEMA.TABLES WHERE table_schema = %s", (schema_name,))
+        return [row[0] for row in cur.fetchall()]
+
+def get_vertica_tables(conn, schema_name):
+    """Fetches table names from Vertica."""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT table_name FROM v_catalog.tables WHERE table_schema = %s", (schema_name,))
+        return [row[0] for row in cur.fetchall()]
+
+def get_snowflake_metadata(conn, schema_name, table_name):
+    """Fetches column names and data types for a table from Snowflake."""
+    query = """
+        SELECT column_name, data_type
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE table_schema = %s AND table_name = %s
+        ORDER BY ordinal_position;
+    """
+    with conn.cursor() as cur:
+        cur.execute(query, (schema_name, table_name))
+        # Returns a map of {normalized_col_name: (OriginalColName, OriginalDataType)}
+        return {normalize(col): (col, dtype) for col, dtype in cur.fetchall()}
+
+def get_vertica_metadata(conn, schema_name, table_name):
+    """Fetches column names and data types for a table from Vertica."""
+    query = """
+        SELECT column_name, data_type
+        FROM v_catalog.columns
+        WHERE table_schema = %s AND table_name = %s
+        ORDER BY ordinal_position;
+    """
+    with conn.cursor() as cur:
+        cur.execute(query, (schema_name, table_name))
+        # Returns a map of {normalized_col_name: (OriginalColName, OriginalDataType)}
+        return {normalize(col): (col, dtype) for col, dtype in cur.fetchall()}
+
+
+def main():
+    sf_conn = None
+    vt_conn = None
+    comparison_results = []
+
+    try:
+        # Establish database connections
+        sf_conn = connect_to_snowflake()
+        vt_conn = connect_to_vertica()
+
+        # Fetch table lists and find common tables
+        sf_tables = get_snowflake_tables(sf_conn, SCHEMA)
+        vt_tables = get_vertica_tables(vt_conn, SCHEMA)
+
+        sf_table_map = {normalize(t): t for t in sf_tables}
+        vt_table_map = {normalize(t): t for t in vt_tables}
+
+        common_tables_norm = sorted(set(sf_table_map.keys()).intersection(set(vt_table_map.keys())))
+        
+        print(f"\nFound {len(common_tables_norm)} common tables. Starting column data type comparison...")
+        
+        # --- Iterate through common tables and compare column data types ---
+        for i, norm_table in enumerate(common_tables_norm):
+            sf_table_name = sf_table_map[norm_table]
+            vt_table_name = vt_table_map[norm_table]
+            
+            print(f"  ({i+1}/{len(common_tables_norm)}) Comparing table: {sf_table_name}")
+
+            # Fetch metadata (column names and data types)
+            sf_cols_meta = get_snowflake_metadata(sf_conn, SCHEMA, sf_table_name)
+            vt_cols_meta = get_vertica_metadata(vt_conn, SCHEMA, vt_table_name)
+
+            # Get a superset of all unique column names from both databases
+            all_columns_norm = sorted(set(sf_cols_meta.keys()) | set(vt_cols_meta.keys()))
+
+            for norm_col in all_columns_norm:
+                sf_meta = sf_cols_meta.get(norm_col)
+                vt_meta = vt_cols_meta.get(norm_col)
+
+                # Extract details, using 'N/A' for missing elements
+                col_name = sf_meta[0] if sf_meta else vt_meta[0]
+                sf_dtype = sf_meta[1] if sf_meta else 'N/A'
+                vt_dtype = vt_meta[1] if vt_meta else 'N/A'
+
+                # Compare data types (case-insensitive)
+                is_different = 0 if normalize(sf_dtype) == normalize(vt_dtype) else 1
+
+                comparison_results.append({
+                    "TableName": sf_table_name,
+                    "ColumnName": col_name,
+                    "DataTypeInVertica": vt_dtype,
+                    "DataTypeInSnowflake": sf_dtype,
+                    "IsDifferent": is_different
+                })
+
+        # --- Process and Export Results ---
+        if not comparison_results:
+            print("\n✅ COMPARISON COMPLETE: No common tables found or tables have no columns.")
+            return
+
+        final_df = pd.DataFrame(comparison_results)
+
+        print("\n=== COMPARISON COMPLETE ===")
+        print("Sample of results:")
+        print(final_df.head().to_string(index=False))
+
+        # Export DataFrame to Excel
+        print(f"\nWriting {len(final_df)} records to {OUTPUT_FILE}...")
+        final_df.to_excel(OUTPUT_FILE, index=False, engine='openpyxl')
+        print(f"✅ Successfully created Excel file: {os.path.abspath(OUTPUT_FILE)}")
+
+    except Exception as e:
+        print(f"\n❌ An unexpected error occurred: {e}")
+    finally:
+        # Close all connections
+        if sf_conn: sf_conn.close()
+        if vt_conn: vt_conn.close()
+        print("\nDatabase connections closed.")
+
 
 if __name__ == "__main__":
-    zip_path = input("Enter full path to .zip file: ")
-    upload_file(zip_path)
+    # Ensure you have the necessary library for writing Excel files
+    try:
+        import openpyxl
+    except ImportError:
+        print("Module 'openpyxl' not found. Please install it using: pip install openpyxl")
+    else:
+        main()
