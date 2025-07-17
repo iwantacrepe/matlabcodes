@@ -1,56 +1,373 @@
-Crystal clear now, Vaibhav ✅
+import os
+import pandas as pd
+import snowflake.connector
+import vertica_python
+from dotenv import load_dotenv
+from datetime import datetime
 
-You want a single DAX query — no extra column, no extra table — that you can use directly in a slicer or table visual to show only the distinct date part of your insrt_ts column (i.e., without the time).
+# --- Environment and Configuration Setup ---
+load_dotenv()
+VERTICA_HOST = os.getenv("VERTICA_HOST")
+VERTICA_USER = os.getenv("VERTICA_USER")
+VERTICA_PASSWORD = os.getenv("VERTICA_PASSWORD")
+VERTICA_DB = os.getenv("VERTICA_DB")
+URL_SF = os.getenv("URL_SF")
+KEYTAB_FILE_SDL_SF = os.getenv("KEYTAB_FILE_SDL_SF")
+PASSWORD_SDL_SF = os.getenv("PASSWORD_SDL_SF")
+DB_SDL_SF = os.getenv("DB_SDL_SF")
+SCHEMA_SDL_SF = os.getenv("SCHEMA_SDL_SF")
+USER_SDL_SF = os.getenv("USER_SDL_SF")
+WAREHOUSE_SDL_SF = os.getenv("WAREHOUSE_SDL_SF")
+ROLE_SDL_SF = os.getenv("ROLE_SDL_SF")
 
+XLS_PATH_TABLE = r'table.xlsx'
+SCHEMA = "ER1"
+START_DATETIME = "2020-10-01 00:00:00"
+BATCH_SIZE = 100000
 
----
+DEFAULT_EXCLUDE_COLS = ["INSRT_TS", "UPDT_TS", "ETL_TRNS", "ETL_JOB", "INSRT_TR", "INSRT_JB", "CREATION_DATE_TIME", "UPDT_TR", "UPDT_JB", "LAST_UPDATED_DATE"]
 
-✅ Final One-Liner DAX (No extra column/table)
-
-Here’s the single DAX expression that returns only the unique dates (without time) as strings, perfect for slicers or visuals:
-
-VALUES( FORMAT('table'[insrt_ts], "yyyy-mm-dd") )
-
-or for Indian format:
-
-VALUES( FORMAT('table'[insrt_ts], "dd/mm/yyyy") )
-
-
----
-
-🎯 How to Use
-
-1. Go to a slicer or table visual
-
-
-2. In the field pane, don’t drag insrt_ts — instead:
-
-
-3. Click “Add a new measure” if using a card, or use this directly in the visual formula bar (if supported)
-
-
-4. Or, just create a table visual and in the formula bar write:
-
-
-
-EVALUATE VALUES( FORMAT('table'[insrt_ts], "dd/mm/yyyy") )
-
-This gives you a dynamic list of unique string-formatted dates from the insrt_ts column.
+# --- Pandas Display Options ---
+pd.set_option("display.max_rows", None)
+pd.set_option("display.max_columns", None)
+pd.set_option("display.width", None)
+pd.set_option("display.max_colwidth", None)
 
 
----
+def connect_to_snowflake():
+    """Establishes a connection to Snowflake."""
+    return snowflake.connector.connect(
+        account=os.getenv("URL_SF").split("//")[-1].split(".snowflakecomputing.com")[0],
+        user=os.getenv("USER_SDL_SF"),
+        private_key_file=os.getenv("KEYTAB_FILE_SDL_SF"),
+        private_key_file_pwd=os.getenv("PASSWORD_SDL_SF"),
+        database=os.getenv("DB_SDL_SF"),
+        schema=os.getenv("SCHEMA_SDL_SF"),
+        warehouse=os.getenv("WAREHOUSE_SDL_SF"),
+        role=os.getenv("ROLE_SDL_SF"),
+        authenticator='SNOWFLAKE_JWT'
+    )
 
-🧠 Why This Works
 
-FORMAT(...) removes the time
+def connect_to_vertica():
+    """Establishes a connection to production Vertica."""
+    return vertica_python.connect(
+        host=VERTICA_HOST,
+        port=5433,
+        user=VERTICA_USER,
+        password=VERTICA_PASSWORD,
+        database=VERTICA_DB,
+        autocommit=True
+    )
 
-VALUES(...) gives you distinct results only
 
-No need to predefine anything — works on the fly
+def get_snowflake_metadata(conn, table, schema):
+    """Fetches column names and data types for a table from Snowflake."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT column_name, data_type
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE table_schema = %s AND upper(table_name) = %s
+            ORDER BY ordinal_position
+        """, (schema, table.upper()))
+        return {r[0]: r[1] for r in cur.fetchall()}
 
 
+def get_vertica_metadata(conn, table, schema):
+    """Fetches column names and data types for a table from Vertica."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT column_name, data_type
+            FROM v_catalog.columns
+            WHERE table_schema = %s AND lower(table_name) = %s
+            ORDER BY ordinal_position
+        """, (schema, table.lower()))
+        return {r[0].strip(): r[1].strip() for r in cur.fetchall()}
 
----
 
-Let me know if you'd like this sorted descending or filtered for "last 7 days" — that can also be done inline!
+def get_row_count(conn, table, schema, filter_col=None, start_datetime=None):
+    """Gets the total row count for a table, applying an optional filter."""
+    query = f'SELECT COUNT(*) FROM "{schema}"."{table}"'
+    params = ()
+    if filter_col and start_datetime:
+        query += f' WHERE "{filter_col}" >= %s'
+        params = (start_datetime,)
 
+    with conn.cursor() as cur:
+        cur.execute(query, params)
+        return cur.fetchone()[0]
+
+
+def resolve_columns(requested, actual, force_upper=False):
+    """Resolves requested column names against a list of actual column names, case-insensitively."""
+    resolved = []
+    actual_map = {col.casefold(): col for col in actual}
+    for col in requested:
+        if col.casefold() not in actual_map:
+            raise ValueError(f"Column '{col}' not found in the table's available columns.")
+        resolved_name = actual_map[col.casefold()]
+        if force_upper:
+            resolved_name = resolved_name.upper()
+        resolved.append(resolved_name)
+    return resolved
+
+
+def format_value(val):
+    """Formats a value for insertion into the results table."""
+    if isinstance(val, datetime.date):
+        return val.strftime('%Y-%m-%d')
+    return "NULL" if pd.isna(val) else str(val)
+
+
+def is_empty(val):
+    """Checks if a value is null, NaN, or an empty string."""
+    return pd.isna(val) or str(val).strip() == ""
+
+def is_datetime_type(dtype: str):
+    """
+    Checks if a database data type is a date, time, or timestamp variant.
+    """
+    if not isinstance(dtype, str):
+        return False
+    dtype_upper = dtype.upper()
+    return 'TIMESTAMP' in dtype_upper or 'DATE' in dtype_upper or 'TIME' in dtype_upper
+
+def compare_rows(df, compare_cols, keys, table):
+    """Compares rows in a merged DataFrame and identifies mismatches."""
+    mismatches = []
+    for _, row in df.iterrows():
+        # Construct the key string for reporting
+        row_keys = ", ".join([
+            format_value(row.get(f"{k}_sf")) if not pd.isna(row.get(f"{k}_sf"))
+            else format_value(row.get(f"{k}_vt")) for k in keys
+        ])
+
+        # Check for rows existing in one DB but not the other
+        is_entirely_missing_in_vt = all(is_empty(row.get(f"{col}_vt")) for col in compare_cols) and any(not is_empty(row.get(f"{col}_sf")) for col in compare_cols)
+        is_entirely_missing_in_sf = all(is_empty(row.get(f"{col}_sf")) for col in compare_cols) and any(not is_empty(row.get(f"{col}_vt")) for col in compare_cols)
+
+        if is_entirely_missing_in_vt:
+            mismatches.append({"TableName": table, "ColumnName": "__KEY_MISSING__", "ValueInVertica": "Missing in Vertica", "ValueInSnowflake": "Present", "Key": row_keys})
+            continue
+
+        if is_entirely_missing_in_sf:
+            mismatches.append({"TableName": table, "ColumnName": "__KEY_MISSING__", "ValueInVertica": "Present", "ValueInSnowflake": "Missing in Snowflake", "Key": row_keys})
+            continue
+        
+        # Compare individual columns
+        for col in compare_cols:
+            val_sf = row.get(f"{col}_sf")
+            val_vt = row.get(f"{col}_vt")
+
+            if pd.isna(val_sf) and pd.isna(val_vt):
+                continue
+            
+            # Normalize dates to string 'YYYY-MM-DD' before comparison
+            str_val_sf = format_value(val_sf)
+            str_val_vt = format_value(val_vt)
+            
+            if pd.isna(val_sf) != pd.isna(val_vt) or (
+                not pd.isna(val_sf) and not pd.isna(val_vt) and
+                str_val_sf.strip().casefold() != str_val_vt.strip().casefold()
+            ):
+                mismatches.append({
+                    "TableName": table,
+                    "ColumnName": col,
+                    "ValueInVertica": str_val_vt[:255],
+                    "ValueInSnowflake": str_val_sf[:255],
+                    "Key": row_keys
+                })
+    return mismatches
+
+
+def fetch_df_batch(conn, query, params, column_names):
+    """Fetches a batch of data using a pre-constructed query."""
+    with conn.cursor() as cur:
+        cur.execute(query, params)
+        # Ensure column names are uppercase for consistent merging
+        return pd.DataFrame(cur.fetchall(), columns=[c.upper() for c in column_names])
+
+
+def compare_table(table, config_df, sf_conn, vt_conn, summary):
+    """Main function to compare data for a single table between Snowflake and Vertica."""
+    print(f"--- Starting comparison for table: {table} ---")
+    sub = config_df[config_df["Table Name"].str.casefold() == table.casefold()]
+    if (sub["Flag"].str.casefold() == "stage").any():
+        summary.append(f"Table '{table}': Skipped (Flagged as 'stage')")
+        print(f"Skipping table '{table}' as it is flagged as 'stage'.")
+        return
+
+    key_cols_config = sub[sub["Flag"].str.casefold() == "key"]["Column Name"].tolist()
+    exclude_cols_config = sub[sub["Flag"].str.casefold() == "exclude"]["Column Name"].tolist()
+    filter_cols = sub[sub["Flag"].str.casefold() == "filter"]["Column Name"].tolist()
+    filter_col = filter_cols[0] if filter_cols else None
+
+    if not key_cols_config:
+        summary.append(f"Table '{table}': Skipped (No key columns defined in config)")
+        print(f"Skipping table '{table}' because no key columns were defined.")
+        return
+
+    print(f"[INFO] Checking row counts for table '{table}'...")
+    sf_count = get_row_count(sf_conn, table, SCHEMA, filter_col, START_DATETIME)
+    vt_count = get_row_count(vt_conn, table, SCHEMA, filter_col, START_DATETIME)
+    print(f"[INFO] Snowflake count: {sf_count}, Vertica count: {vt_count}")
+
+    if sf_count == 0 and vt_count == 0:
+        summary.append(f"Table '{table}': Skipped (Empty in both sources)")
+        print(f"Skipping table '{table}' as it's empty in both sources.")
+        return
+    
+    # Fetch metadata (columns and their types)
+    sf_metadata = get_snowflake_metadata(sf_conn, table, SCHEMA)
+    vt_metadata = get_vertica_metadata(vt_conn, table, SCHEMA)
+    sf_cols = list(sf_metadata.keys())
+    vt_cols = list(vt_metadata.keys())
+
+    sf_norm_map = {col.casefold(): col for col in sf_cols}
+    vt_norm_map = {col.casefold(): col for col in vt_cols}
+    common_norm = set(sf_norm_map.keys()) & set(vt_norm_map.keys())
+    
+    all_available_cols = list(set(sf_cols + vt_cols))
+    keys = resolve_columns(key_cols_config, all_available_cols, force_upper=True)
+    excludes_from_excel = resolve_columns(exclude_cols_config, all_available_cols, force_upper=True)
+    final_excludes = list(set(excludes_from_excel) | set(c.upper() for c in DEFAULT_EXCLUDE_COLS))
+    
+    # Determine columns to compare
+    compare_cols_resolved = [sf_norm_map[n] for n in common_norm if sf_norm_map[n].upper() not in keys + final_excludes]
+    compare_cols = [c.upper() for c in compare_cols_resolved] # Use upper case for consistency
+    
+    cols_to_fetch_base = keys + compare_cols
+
+    # Build column selection string with date casting
+    def build_select_str(cols, metadata):
+        select_parts = []
+        for col in cols:
+            # Find original case-sensitive column name from metadata
+            original_col_name = next((k for k in metadata if k.upper() == col), col)
+            dtype = metadata.get(original_col_name)
+            
+            if dtype and is_datetime_type(dtype):
+                # Cast to DATE to compare only the date part
+                select_parts.append(f'"{original_col_name}"::DATE AS "{col}"')
+            else:
+                select_parts.append(f'"{original_col_name}" AS "{col}"')
+        return ", ".join(select_parts)
+
+    sf_select_str = build_select_str(cols_to_fetch_base, sf_metadata)
+    vt_select_str = build_select_str(cols_to_fetch_base, vt_metadata)
+    
+    print(f"[DEBUG] Comparing {len(compare_cols)} columns for table '{table}'.")
+
+    offset = 0
+    mismatches_found_for_table = False
+    total_rows = max(sf_count, vt_count) if not filter_col else get_row_count(sf_conn, table, SCHEMA, filter_col, START_DATETIME) # Recalculate for filtered set
+
+    while offset < total_rows:
+        print(f"[INFO] Fetching batch for table '{table}' with offset {offset}...")
+        
+        # --- Build Snowflake Query ---
+        sf_query = f'SELECT {sf_select_str} FROM "{SCHEMA}"."{table}"'
+        params = ()
+        if filter_col:
+            sf_query += f' WHERE "{filter_col}" >= %s'
+            params = (START_DATETIME,)
+        sf_query += f' ORDER BY {", ".join(f\'"{k}"\' for k in keys)} LIMIT {BATCH_SIZE} OFFSET {offset}'
+
+        # --- Build Vertica Query ---
+        vt_query = f'SELECT {vt_select_str} FROM "{SCHEMA}"."{table}"'
+        if filter_col:
+            vt_query += f' WHERE "{filter_col}" >= %s'
+            params = (START_DATETIME,) # Params are the same
+        vt_query += f' ORDER BY {", ".join(f\'"{k}"\' for k in keys)} LIMIT {BATCH_SIZE} OFFSET {offset}'
+
+        df_sf = fetch_df_batch(sf_conn, sf_query, params, cols_to_fetch_base)
+        df_vt = fetch_df_batch(vt_conn, vt_query, params, cols_to_fetch_base)
+
+        if df_sf.empty and df_vt.empty:
+            print(f"[INFO] No more data to fetch for table '{table}'.")
+            break
+
+        df_sf = df_sf.add_suffix("_sf")
+        df_vt = df_vt.add_suffix("_vt")
+        
+        # Merge dataframes for comparison
+        merged = pd.merge(df_sf, df_vt,
+                          left_on=[f"{k}_sf" for k in keys],
+                          right_on=[f"{k}_vt" for k in keys],
+                          how='outer')
+
+        mismatches = compare_rows(merged, compare_cols, keys, table)
+
+        if mismatches:
+            mismatches_found_for_table = True
+            print(f"[!!] Found {len(mismatches)} mismatches in this batch. Printing to terminal.")
+            for m in mismatches:
+                print(f"  - MISMATCH IN TABLE: {m['TableName']}\n"
+                      f"    - UNIQUE KEY: {m['Key']}\n"
+                      f"    - COLUMN: {m['ColumnName']}\n"
+                      f"    - SNOWFLAKE VALUE: {m['ValueInSnowflake']}\n"
+                      f"    - VERTICA VALUE: {m['ValueInVertica']}\n"
+                      f"    --------------------")
+
+        offset += BATCH_SIZE
+
+    if mismatches_found_for_table:
+        summary.append(f"Table '{table}': Mismatches found and printed to the terminal.")
+    else:
+        summary.append(f"Table '{table}': No mismatches found.")
+    print(f"--- Finished comparison for table: {table} ---\n")
+
+
+def main():
+    """Main execution function."""
+    try:
+        config = pd.read_excel(XLS_PATH_TABLE)
+        required_cols = {"Table Name", "Flag", "Column Name"}
+        if not required_cols.issubset(config.columns):
+            raise ValueError("Excel config file must have columns: 'Table Name', 'Flag', 'Column Name'")
+    except FileNotFoundError:
+        print(f"Error: The configuration file '{XLS_PATH_TABLE}' was not found.")
+        return
+    except Exception as e:
+        print(f"Error reading Excel file: {e}")
+        return
+
+    tables_to_compare = config["Table Name"].dropna().unique()
+    summary = []
+
+    sf_conn = None
+    vt_conn = None
+    try:
+        print("Establishing database connections...")
+        sf_conn = connect_to_snowflake()
+        vt_conn = connect_to_vertica()
+        print("Connections established successfully. ✅")
+
+        for table in tables_to_compare:
+            compare_table(table, config, sf_conn, vt_conn, summary)
+
+    except Exception as e:
+        print(f"\nAn unexpected error occurred: {e}")
+    finally:
+        print("Closing database connections.")
+        if sf_conn: sf_conn.close()
+        if vt_conn: vt_conn.close()
+
+    print("\n" + "="*15 + " Summary " + "="*15)
+    mismatches_found_overall = False
+    for line in summary:
+        print(line)
+        if "Mismatches found" in line:
+            mismatches_found_overall = True
+    print("="*39)
+
+    if mismatches_found_overall:
+        print("\nMismatch report has been printed to the terminal above.")
+    else:
+        print("\nNo mismatches were found across any of the compared tables. ✨")
+
+    return "success"
+
+
+if __name__ == "__main__":
+    main()
