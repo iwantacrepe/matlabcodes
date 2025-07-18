@@ -2,408 +2,488 @@ import os
 import pandas as pd
 import snowflake.connector
 import vertica_python
-#from dotenv import load_dotenv
-from datetime import datetime
-#import time
-#import psutil
-#import threading
-#import statistics
+from dotenv import load_dotenv
 
-VERTICA_HOST=VERTICA_HOST
-VERTICA_USER=VERTICA_USER
-VERTICA_PASSWORD=VERTICA_PASSWORD
-VERTICA_DB=VERTICA_DB
-VERTICA_HOST_DEV=VERTICA_HOST_DEV
-VERTICA_USER_DEV=VERTICA_USER_DEV
-VERTICA_PASSWORD_DEV=VERTICA_PASSWORD_DEV
-VERTICA_DB_DEV=VERTICA_DB_DEV
-URL_SF=URL_SF
-KEYTAB_FILE_SDL_SF=KEYTAB_FILE_SDL_SF
-PASSWORD_SDL_SF=PASSWORD_SDL_SF
-DB_SDL_SF=DB_SDL_SF
-DB_SDL_SF_VW=DB_SDL_SF_VW
-SCHEMA_SDL_SF=SCHEMA_SDL_SF
-USER_SDL_SF=USER_SDL_SF
-WAREHOUSE_SDL_SF=WAREHOUSE_SDL_SF
-ROLE_SDL_SF=ROLE_SDL_SF
-KEYTAB_DIR=KEYTAB_DIR
-DATA_DIR_VAR=DATA_DIR_VAR,
-SNOWFLAKE_JWT="SNOWFLAKE_JWT"
-FILE_NAME="view.xlsx"
-XLS_PATH_VIEW=DATA_DIR_VAR[0]+FILE_NAME
-
+# --- Configuration & Setup ---
 pd.set_option("display.max_rows", None)
 pd.set_option("display.max_columns", None)
 pd.set_option("display.width", None)
 pd.set_option("display.max_colwidth", None)
 
-# load_dotenv()
+load_dotenv()
+SCHEMA = os.getenv("ER1_SCHEMA", "ER1")
+OUTPUT_TABLE = "vertica_snowflake_ddl_comparison"
 
-SCHEMA ="ER1"
-START_DATETIME = "2020-10-01 00:00:00"
-BATCH_SIZE = 100000
+# --- Helper Functions ---
+def normalize(name: str) -> str:
+    """Returns a case-insensitive version of a string."""
+    return name.casefold()
 
-# --- ADDITION: Helper function to identify date/time types ---
-def is_datetime_type(dtype):
-    """
-    Checks if a column's data type is a date, time, or timestamp variant.
-    """
-    if not isinstance(dtype, str):
-        return False
-    dtype_upper = dtype.upper()
-    return 'TIMESTAMP' in dtype_upper or 'DATE' in dtype_upper or 'TIME' in dtype_upper
-
-def connect_to_snowflake():
-    """Establishes a connection to Snowflake."""
-    return snowflake.connector.connect(
-         account = URL_SF.split("//")[-1].split(".snowflakecomputing.com")[0],
+# --- Connection Functions ---
+def connect_to_snowflake_for_tables():
+    """Establishes a connection to the source Snowflake database for tables."""
+    print("Connecting to source Snowflake for tables...")
+    try:
+        conn = snowflake.connector.connect(
+            account = URL_SF.split("//")[-1].split(".snowflakecomputing.com")[0],
             user=USER_SDL_SF,
             private_key_file=os.path.join(KEYTAB_DIR, KEYTAB_FILE_SDL_SF),
             private_key_file_pwd=PASSWORD_SDL_SF,
-            database=DB_SDL_SF_VW,
+            database=DB_SDL_SF,
             schema=SCHEMA_SDL_SF,
             warehouse=WAREHOUSE_SDL_SF,
             role=ROLE_SDL_SF,
             authenticator=SNOWFLAKE_JWT
-    )
+        )
+        print("Source Snowflake for tables connected.")
+        return conn
+    except Exception as e:
+        print(f"Error connecting to source Snowflake for tables: {e}")
+        raise
+
+def connect_to_snowflake_for_views():
+    """Establishes a connection to the source Snowflake database for views."""
+    print("Connecting to source Snowflake for views...")
+    try:
+        conn = snowflake.connector.connect(
+            account = URL_SF.split("//")[-1].split(".snowflakecomputing.com")[0],
+            user=USER_SDL_SF,
+            private_key_file=os.path.join(KEYTAB_DIR, KEYTAB_FILE_SDL_SF),
+            private_key_file_pwd=PASSWORD_SDL_SF,
+            database="SDL_CONSUMPTION_DB",
+            schema=SCHEMA_SDL_SF,
+            warehouse=WAREHOUSE_SDL_SF,
+            role=ROLE_SDL_SF,
+            authenticator=SNOWFLAKE_JWT
+        )
+        print("Source Snowflake for views connected.")
+        return conn
+    except Exception as e:
+        print(f"Error connecting to source Snowflake for views: {e}")
+        raise
 
 def connect_to_vertica():
-    """Establishes a connection to production Vertica."""
-    return vertica_python.connect(
-        host=VERTICA_HOST,
+    """Establishes a connection to the source Vertica database."""
+    print("Connecting to source Vertica...")
+    try:
+        conn = vertica_python.connect(
+            host=VERTICA_HOST,
             port=5433,
             user=VERTICA_USER,
             password=VERTICA_PASSWORD,
             database=VERTICA_DB,
             autocommit=True
-    )
+        )
+        print("Source Vertica connected.")
+        return conn
+    except Exception as e:
+        print(f"Error connecting to source Vertica: {e}")
+        raise
 
 def connect_to_vertica_dev():
-    """Establishes a connection to development Vertica for logging mismatches."""
-    return vertica_python.connect(
-        host=VERTICA_HOST_DEV,
+    """Establishes a connection to the destination Vertica DEV database for logging."""
+    print("Connecting to destination Vertica (DEV)...")
+    try:
+        conn = vertica_python.connect(
+            host=VERTICA_HOST_DEV,
             port= 5433,
             user=VERTICA_USER_DEV,
             password=VERTICA_PASSWORD_DEV,
             database=VERTICA_DB_DEV,
             autocommit=True
-    )
+        )
+        print("Destination Vertica (DEV) connected.")
+        return conn
+    except Exception as e:
+        print(f"Error connecting to destination Vertica (DEV): {e}")
+        raise
 
-# --- MODIFICATION: Fetch column names and their data types for views ---
-def get_columns_and_types(conn, object_name, dbtype="snowflake"):
-    """
-    Fetches column names and data types for a given view from the database.
-    """
-    if dbtype == "snowflake":
-        # INFORMATION_SCHEMA.COLUMNS works for both tables and views in Snowflake
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT column_name, data_type
-                FROM INFORMATION_SCHEMA.COLUMNS
-                WHERE table_schema = %s AND UPPER(table_name) = %s
-                ORDER BY ordinal_position
-            """, (SCHEMA, object_name.upper()))
-            return {r[0]: r[1] for r in cur.fetchall()}
-    else: # vertica
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT column_name, data_type
-                FROM v_catalog.view_columns
-                WHERE table_schema = %s AND LOWER(table_name) = %s
-                ORDER BY ordinal_position
-            """, (SCHEMA, object_name.lower()))
-            return {r[0]: r[1] for r in cur.fetchall()}
-
-
-def get_row_count(conn, view_name, schema, filter_col=None, start_datetime=None):
-    """Gets the total row count for a view, applying an optional filter."""
-    query = f'SELECT COUNT(*) FROM "{schema}"."{view_name}"'
-    params = ()
-    if filter_col and start_datetime:
-        query += f' WHERE "{filter_col}" >= %s'
-        params = (start_datetime,)
-
+# --- Metadata Fetching Functions ---
+def get_snowflake_tables(conn, schema_name):
+    """Fetches table names from Snowflake."""
     with conn.cursor() as cur:
-        cur.execute(query, params)
-        return cur.fetchone()[0]
+        cur.execute(f"SELECT table_name FROM INFORMATION_SCHEMA.TABLES WHERE table_schema = %s", (schema_name,))
+        return [row[0] for row in cur.fetchall()]
 
-def resolve_columns(requested, actual, force_upper=False):
-    """Resolves requested column names against a list of actual column names, case-insensitively."""
-    resolved = []
-    actual_map = {col.casefold(): col for col in actual}
-    for col in requested:
-        if col.casefold() not in actual_map:
-            raise ValueError(f"Column '{col}' not found in the view's available columns.")
-        resolved_name = actual_map[col.casefold()]
-        if force_upper:
-            resolved_name = resolved_name.upper()
-        resolved.append(resolved_name)
-    return resolved
+def get_vertica_tables(conn, schema_name):
+    """Fetches table names from Vertica."""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT table_name FROM v_catalog.tables WHERE table_schema = %s", (schema_name,))
+        return [row[0] for row in cur.fetchall()]
 
-def format_value(val):
-    """Formats a value for insertion into the results table."""
-    return "NULL" if pd.isna(val) else str(val)
+def get_snowflake_columns(conn, table_name, schema_name):
+    """Fetches column names for a given table/view from Snowflake."""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT column_name FROM INFORMATION_SCHEMA.COLUMNS WHERE table_schema = %s AND table_name = %s", (schema_name, table_name))
+        return [row[0] for row in cur.fetchall()]
 
-def is_empty(val):
-    """Checks if a value is null, NaN, or an empty string."""
-    return pd.isna(val) or str(val).strip() == ""
+def get_vertica_table_columns(conn, table_name, schema_name):
+    """Fetches column names for a given table from Vertica."""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT column_name FROM v_catalog.columns WHERE table_schema = %s AND UPPER(table_name) = UPPER(%s)", (schema_name, table_name))
+        return [row[0] for row in cur.fetchall()]
 
+def get_snowflake_views(conn, schema_name):
+    """Fetches view names from Snowflake."""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT table_name FROM INFORMATION_SCHEMA.VIEWS WHERE table_schema = %s", (schema_name,))
+        return [row[0] for row in cur.fetchall()]
 
-def compare_rows(df, compare_cols, keys, view_name):
-    """Compares rows in a merged DataFrame and identifies mismatches."""
-    mismatches = []
-    for _, row in df.iterrows():
-        row_keys = ", ".join([
-            format_value(row.get(f"{k}_sf")) if not pd.isna(row.get(f"{k}_sf"))
-            else format_value(row.get(f"{k}_vt")) for k in keys
-        ])
+def get_vertica_views(conn, schema_name):
+    """Fetches view names from Vertica."""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT table_name FROM v_catalog.views WHERE table_schema = %s", (schema_name,))
+        return [row[0] for row in cur.fetchall()]
 
-        is_entirely_missing_in_vt = all(is_empty(row.get(f"{col}_vt")) for col in compare_cols) and any(not is_empty(row.get(f"{col}_sf")) for col in compare_cols)
-        is_entirely_missing_in_sf = all(is_empty(row.get(f"{col}_sf")) for col in compare_cols) and any(not is_empty(row.get(f"{col}_vt")) for col in compare_cols)
+def get_vertica_view_columns(conn, view_name, schema_name):
+    """Fetches column names for a given view from Vertica."""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT column_name FROM v_catalog.view_columns WHERE table_schema = %s AND UPPER(table_name) = UPPER(%s)", (schema_name, view_name))
+        return [row[0] for row in cur.fetchall()]
 
-        if is_entirely_missing_in_vt:
-            mismatches.append({
-                "ViewName": view_name,
-                "ColumnName": "Row is Missing",
-                "ValueInVertica": "Missing in Vertica",
-                "ValueInSnowflake": "Present",
-                "Key": row_keys
-            })
-            continue
-
-        if is_entirely_missing_in_sf:
-            mismatches.append({
-                "ViewName": view_name,
-                "ColumnName": "Row is Missing",
-                "ValueInVertica": "Present",
-                "ValueInSnowflake": "Missing in Snowflake",
-                "Key": row_keys
-            })
-            continue
-
-        for col in compare_cols:
-            val_sf = row.get(f"{col}_sf")
-            val_vt = row.get(f"{col}_vt")
-
-            if pd.isna(val_sf) and pd.isna(val_vt):
-                continue
-
-            if pd.isna(val_sf) != pd.isna(val_vt) or (
-                not pd.isna(val_sf) and not pd.isna(val_vt) and
-                str(val_sf).strip().casefold() != str(val_vt).strip().casefold()
-            ):
-                mismatches.append({
-                    "ViewName": view_name,
-                    "ColumnName": col,
-                    "ValueInVertica": format_value(val_vt)[:255] if val_vt is not None else "NULL",
-                    "ValueInSnowflake": format_value(val_sf)[:255] if val_sf is not None else "NULL",
-                    "Key": row_keys
-                })
-    return mismatches
-
-def compare_view(view_name, config_df, sf_conn, vt_conn, vt_dev_conn, summary):
-    """Main function to compare data for a single view between Snowflake and Vertica."""
-    print(f"--- Starting comparison for view: {view_name} ---")
-    sub = config_df[config_df["Table Name"].str.casefold() == view_name.casefold()]
-    if (sub["Flag"].str.casefold() == "stage").any():
-        summary.append(f"View '{view_name}': Skipped (Flagged as 'stage')")
-        print(f"Skipping view '{view_name}' as it is flagged as 'stage'.")
+# --- Data Writing Functions ---
+def write_table_mismatches_to_vertica(conn, mismatches_df):
+    """Clears the target table and writes the table mismatch DataFrame to Vertica."""
+    if mismatches_df.empty:
+        print("\nNo table mismatches found. Nothing to write.")
         return
 
-    key_cols = sub[sub["Flag"].str.casefold() == "key"]["Column Name"].tolist()
-    exclude_cols_from_config = sub[sub["Flag"].str.casefold() == "exclude"]["Column Name"].tolist()
-    default_exclude_cols = ["INSRT_TS", "UPDT_TS","ETL_TRNS","ETL_JOB","INSRT_TR","INSRT_JB","CREATION_DATE_TIME","UPDT_TR","UPDT_JB","LAST_UPDATED_DATE"]
-    final_excludes = list(set(exclude_cols_from_config) | set(default_exclude_cols))
+    print(f"\nWriting {len(mismatches_df)} table mismatches to Vertica table: {OUTPUT_TABLE}...")
+    with conn.cursor() as cur:
+        try:
+            print(f"Deleting table {OUTPUT_TABLE} data that is older than 7 days...")
+            delete_query = f"DELETE FROM ER1.{OUTPUT_TABLE} WHERE insrt_ts < CURRENT_TIMESTAMP - INTERVAL '7 DAY' OR CURRENT_DATE = TRUNC(insrt_ts)"
+            cur.execute(delete_query)
+            print("Table truncated.")
 
-    filter_cols = sub[sub["Flag"].str.casefold() == "filter"]["Column Name"].tolist()
-    filter_col = filter_cols[0] if filter_cols else None
-
-    if filter_col:
-        print(f"[INFO] Applying filter on column '{filter_col}' from '{START_DATETIME}'.")
-
-    if not key_cols:
-        summary.append(f"View '{view_name}': Skipped (No key columns defined in config)")
-        print(f"Skipping view '{view_name}' because no key columns were defined.")
-        return
-
-    print(f"[INFO] Checking row counts for view '{view_name}'...")
-    sf_count = get_row_count(sf_conn, view_name, SCHEMA, filter_col, START_DATETIME)
-    vt_count = get_row_count(vt_conn, view_name, SCHEMA, filter_col, START_DATETIME)
-    print(f"[INFO] Snowflake count: {sf_count}, Vertica count: {vt_count}")
-
-    data_to_insert = None
-    if sf_count == 0 and vt_count > 0:
-        summary.append(f"View '{view_name}': Logged as empty in Snowflake (Vertica has {vt_count} rows)")
-        print(f"[!!] View '{view_name}' is empty in Snowflake but not in Vertica. Logging this and skipping comparison.")
-        data_to_insert = [(view_name, 'EmptyView', f'{vt_count} rows', 'Empty', 'View is empty in Snowflake')]
-    elif vt_count == 0 and sf_count > 0:
-        summary.append(f"View '{view_name}': Logged as empty in Vertica (Snowflake has {sf_count} rows)")
-        print(f"[!!] View '{view_name}' is empty in Vertica but not in Snowflake. Logging this and skipping comparison.")
-        data_to_insert = [(view_name, 'EmptyView', 'Empty', f'{sf_count} rows', 'View is empty in Vertica')]
-    elif sf_count == 0 and vt_count == 0:
-        summary.append(f"View '{view_name}': Skipped (Empty in both sources)")
-        print(f"Skipping view '{view_name}' as it's empty in both Snowflake and Vertica.")
-        return
-    if data_to_insert:
-        insert_query = """
-            INSERT INTO ER1.vertica_snowflake_view_data_comparison
-            (view_name, column_name, value_in_vertica, value_in_snowflake, unique_key)
-            VALUES (%s, %s, %s, %s, %s)
-        """
-        with vt_dev_conn.cursor() as cur:
-            cur.executemany(insert_query, data_to_insert)
-        return
-
-    # --- MODIFICATION: Use the new function to get column types ---
-    sf_cols_map = get_columns_and_types(sf_conn, view_name, dbtype="snowflake")
-    vt_cols_map = get_columns_and_types(vt_conn, view_name, dbtype="vertica")
-
-    sf_cols = list(sf_cols_map.keys())
-    vt_cols = list(vt_cols_map.keys())
-
-    sf_norm_map = {col.casefold(): col for col in sf_cols}
-    vt_norm_map = {col.casefold(): col for col in vt_cols}
-    common_norm = set(sf_norm_map.keys()) & set(vt_norm_map.keys())
-    common_cols = [sf_norm_map[n] for n in common_norm]
-    all_cols = list(set(sf_cols + vt_cols))
-
-    keys = resolve_columns(key_cols, all_cols, force_upper=True)
-    
-    compare_cols = [
-        col for col in common_cols if col.upper() not in keys and col.casefold() not in [e.casefold() for e in final_excludes]
-    ]
-
-    print(f"[DEBUG] Comparing {len(compare_cols)} columns for view '{view_name}'.")
-
-    # --- MODIFICATION: The nested batch fetch now handles date casting ---
-    def fetch_df_batch(conn, dbtype, limit, offset):
-        """Fetches a batch of data from the specified database view, casting date/time types."""
-        cols_to_fetch = keys + compare_cols
-        
-        col_map = sf_cols_map if dbtype == "snowflake" else vt_cols_map
-
-        select_expressions = []
-        for c in cols_to_fetch:
-            original_col_name = next((k for k in col_map if k.casefold() == c.casefold()), c)
-            dtype = col_map.get(original_col_name)
-            
-            if is_datetime_type(dtype):
-                select_expressions.append(f'"{original_col_name}"::DATE AS "{c}"')
-            else:
-                select_expressions.append(f'"{original_col_name}" AS "{c}"')
-        
-        col_str = ", ".join(select_expressions)
-        query = f'SELECT {col_str} FROM "{SCHEMA}"."{view_name}"'
-        
-        params = ()
-        if filter_col:
-            query += f' WHERE "{filter_col}" >= %s'
-            params = (START_DATETIME,)
-        
-        order_by_str = ", ".join(f'"{k}"' for k in keys)
-        query += f' ORDER BY {order_by_str}'
-        query += f' LIMIT {limit} OFFSET {offset}'
-
-        with conn.cursor() as cur:
-            cur.execute(query, params)
-            columns = [desc[0].upper() for desc in cur.description] if cur.description else [c.upper() for c in cols_to_fetch]
-            return pd.DataFrame(cur.fetchall(), columns=columns)
-
-    offset = 0
-    mismatches_found_for_view = False
-    while True:
-        print(f"[INFO] Fetching batch for view '{view_name}' with offset {offset}...")
-        df_sf = fetch_df_batch(sf_conn, "snowflake", BATCH_SIZE, offset)
-        df_vt = fetch_df_batch(vt_conn, "vertica", BATCH_SIZE, offset)
-
-        if df_sf.empty and df_vt.empty:
-            print(f"[INFO] No more data to fetch for view '{view_name}'.")
-            break
-
-        df_sf = df_sf.add_suffix("_sf")
-        df_vt = df_vt.add_suffix("_vt")
-
-        merged = pd.merge(df_sf, df_vt,
-                          left_on=[f"{k}_sf" for k in keys],
-                          right_on=[f"{k}_vt" for k in keys],
-                          how='outer')
-
-        mismatches = compare_rows(merged, compare_cols, keys, view_name)
-
-        if mismatches:
-            mismatches_found_for_view = True
-            print(f"[!!] Found {len(mismatches)} mismatches in this batch. Writing to database.")
-
-            data_to_insert = [
-                (m['ViewName'], m['ColumnName'], m['ValueInVertica'], m['ValueInSnowflake'], m['Key'])
-                for m in mismatches
-            ]
-
-            insert_query = """
-                INSERT INTO ER1.vertica_snowflake_view_data_comparison
-                (view_name, column_name, value_in_vertica, value_in_snowflake, unique_key)
+            insert_query = f"""
+                INSERT INTO ER1.{OUTPUT_TABLE} (table_name, column_name, object_type, present_in_vertica, present_in_snowflake)
                 VALUES (%s, %s, %s, %s, %s)
             """
+            data_to_insert = [tuple(row) for row in mismatches_df.to_numpy()]
 
-            with vt_dev_conn.cursor() as cur:
-                cur.executemany(insert_query, data_to_insert)
+            cur.executemany(insert_query, data_to_insert)
+            conn.commit()
+            print(f"Successfully inserted {len(data_to_insert)} records.")
 
-        offset += BATCH_SIZE
+        except Exception as e:
+            print(f"An error occurred while writing to Vertica: {e}")
+            conn.rollback()
+            raise
 
-    if mismatches_found_for_view:
-        summary.append(f"View '{view_name}': Mismatches found and written to the database.")
-    else:
-        summary.append(f"View '{view_name}': No mismatches found.")
-    print(f"--- Finished comparison for view: {view_name} ---\n")
+def write_view_mismatches_to_vertica(conn, mismatches_df):
+    """writes the view mismatch DataFrame to Vertica."""
+    if mismatches_df.empty:
+        print("\nNo view mismatches found. Nothing to write.")
+        return
 
+    print(f"\nWriting {len(mismatches_df)} view mismatches to Vertica table: {OUTPUT_TABLE}...")
+    with conn.cursor() as cur:
+        try:
+            insert_query = f"""
+                INSERT INTO ER1.{OUTPUT_TABLE} (table_name, column_name, object_type, present_in_vertica, present_in_snowflake)
+                VALUES (%s, %s, %s, %s, %s)
+            """
+            data_to_insert = [tuple(row) for row in mismatches_df.to_numpy()]
 
+            cur.executemany(insert_query, data_to_insert)
+            conn.commit()
+            print(f"Successfully inserted {len(data_to_insert)} records.")
 
-# try:
-config = pd.read_excel(XLS_PATH_VIEW)
-required_cols = {"Table Name", "Flag", "Column Name"}
-#     if not required_cols.issubset(config.columns):
-#         raise ValueError("Excel config file must have columns: 'Table Name', 'Flag', 'Column Name'")
-# except FileNotFoundError:
-#     print(f"Error: The configuration file '{XLS_PATH_VIEW}' was not found.")
+        except Exception as e:
+            print(f"An error occurred while writing to Vertica: {e}")
+            conn.rollback()
+            raise
 
+# --- Main Logic ---
+def main_table(config):
+    global VERTICA_HOST, VERTICA_USER, VERTICA_PASSWORD, VERTICA_DB
+    global VERTICA_HOST_DEV, VERTICA_USER_DEV, VERTICA_PASSWORD_DEV, VERTICA_DB_DEV
+    global URL_SF, KEYTAB_FILE_SDL_SF, PASSWORD_SDL_SF, DB_SDL_SF
+    global DB_SDL_SF_VW, SCHEMA_SDL_SF, USER_SDL_SF, WAREHOUSE_SDL_SF
+    global ROLE_SDL_SF, KEYTAB_DIR, DATA_DIR_VAR, SNOWFLAKE_JWT
 
-views_to_compare = config["Table Name"].dropna().unique()
+    VERTICA_HOST = config["VERTICA_HOST"]
+    VERTICA_USER = config["VERTICA_USER"]
+    VERTICA_PASSWORD = config["VERTICA_PASSWORD"]
+    VERTICA_DB = config["VERTICA_DB"]
+    VERTICA_HOST_DEV = config["VERTICA_HOST_DEV"]
+    VERTICA_USER_DEV = config["VERTICA_USER_DEV"]
+    VERTICA_PASSWORD_DEV = config["VERTICA_PASSWORD_DEV"]
+    VERTICA_DB_DEV = config["VERTICA_DB_DEV"]
+    URL_SF = config["URL_SF"]
+    KEYTAB_FILE_SDL_SF = config["KEYTAB_FILE_SDL_SF"]
+    PASSWORD_SDL_SF = config["PASSWORD_SDL_SF"]
+    DB_SDL_SF = config["DB_SDL_SF"]
+    DB_SDL_SF_VW = config["DB_SDL_SF_VW"]
+    SCHEMA_SDL_SF = config["SCHEMA_SDL_SF"]
+    USER_SDL_SF = config["USER_SDL_SF"]
+    WAREHOUSE_SDL_SF = config["WAREHOUSE_SDL_SF"]
+    ROLE_SDL_SF = config["ROLE_SDL_SF"]
+    KEYTAB_DIR = config["KEYTAB_DIR"]
+    DATA_DIR_VAR = config["DATA_DIR_VAR"]
+    SNOWFLAKE_JWT = config["SNOWFLAKE_JWT"]
+    sf_conn = None
+    vt_conn = None
+    vt_dev_conn = None
 
-sf_conn = connect_to_snowflake()
-vt_conn = connect_to_vertica()
-vt_dev_conn = connect_to_vertica_dev()
+    try:
+        sf_conn = connect_to_snowflake_for_tables()
+        vt_conn = connect_to_vertica()
+        vt_dev_conn = connect_to_vertica_dev()
+        sf_tables = get_snowflake_tables(sf_conn, SCHEMA)
+        vt_tables = get_vertica_tables(vt_conn, SCHEMA)
 
-summary = []
+        sf_table_map = {normalize(t): t for t in sf_tables}
+        vt_table_map = {normalize(t): t for t in vt_tables}
 
-try:
-    with vt_dev_conn.cursor() as cur:
-        print("Deleting data older than 7 days from: ER1.vertica_snowflake_view_data_comparison")
-        delete_query = "DELETE FROM ER1.vertica_snowflake_view_data_comparison WHERE insrt_ts < CURRENT_TIMESTAMP - INTERVAL '7 DAY' OR CURRENT_DATE = TRUNC(insrt_ts);"
-        cur.execute(delete_query)
-        print(f"[DEBUG] Deleted {cur.rowcount} old rows.")
+        sf_norm_set = set(sf_table_map.keys())
+        vt_norm_set = set(vt_table_map.keys())
 
-    for view_name in views_to_compare:
-        compare_view(view_name, config, sf_conn, vt_conn, vt_dev_conn, summary)
+        mismatches = []
+        tables_only_in_sf = sf_norm_set - vt_norm_set
+        tables_only_in_vt = vt_norm_set - sf_norm_set
 
-except Exception as e:
-    print(f"\nAn unexpected error occurred: {e}")
-finally:
-    print("Closing database connections.")
-    if sf_conn: sf_conn.close()
-    if vt_conn: vt_conn.close()
-    if vt_dev_conn: vt_dev_conn.close()
+        for norm_table in sorted(tables_only_in_sf):
+            mismatches.append({
+                "TableName": sf_table_map[norm_table],
+                "ColumnName": "N/A",
+                "ObjectType": "table",
+                "PresentInVertica": "N",
+                "PresentInSnowflake": "Y",
+            })
 
-print("\n" + "="*15 + " Summary " + "="*15)
-mismatches_found_overall = False
-for line in summary:
-    print(line)
-    if "Mismatches found" in line or "Logged as empty" in line:
-        mismatches_found_overall = True
-print("="*39)
+        for norm_table in sorted(tables_only_in_vt):
+            mismatches.append({
+                "TableName": vt_table_map[norm_table],
+                "ColumnName": "N/A",
+                "ObjectType": "table",
+                "PresentInVertica": "Y",
+                "PresentInSnowflake": "N",
+            })
 
-if mismatches_found_overall:
-    print("\nMismatch report has been saved to the Vertica table: ER1.vertica_snowflake_view_data_comparison")
-else:
-    print("\nNo mismatches were found across any of the compared views.")
-outvar="success"
+        common_tables = sorted(sf_norm_set.intersection(vt_norm_set))
+        print(f"\nFound {len(common_tables)} common tables to compare for column differences...")
 
+        for norm_table in common_tables:
+            sf_table_name = sf_table_map[norm_table]
+            vt_table_name = vt_table_map[norm_table]
+
+            sf_cols = get_snowflake_columns(sf_conn, sf_table_name, SCHEMA)
+            vt_cols = get_vertica_table_columns(vt_conn, vt_table_name, SCHEMA)
+
+            sf_col_map = {normalize(col): col for col in sf_cols}
+            vt_col_map = {normalize(col): col for col in vt_cols}
+
+            sf_col_norm_set = set(sf_col_map.keys())
+            vt_col_norm_set = set(vt_col_map.keys())
+
+            cols_only_in_sf = sf_col_norm_set - vt_col_norm_set
+            cols_only_in_vt = vt_col_norm_set - sf_col_norm_set
+
+            for col_norm in sorted(cols_only_in_sf):
+                mismatches.append({
+                    "TableName": sf_table_name,
+                    "ColumnName": sf_col_map[col_norm],
+                    "ObjectType": "column",
+                    "PresentInVertica": "N",
+                    "PresentInSnowflake": "Y",
+                })
+
+            for col_norm in sorted(cols_only_in_vt):
+                 mismatches.append({
+                    "TableName": sf_table_name, 
+                    "ColumnName": vt_col_map[col_norm],
+                    "ObjectType": "column",
+                    "PresentInVertica": "Y",
+                    "PresentInSnowflake": "N",
+                })
+
+        if not mismatches:
+            print("\n=== TABLE COMPARISON COMPLETE: No mismatches found. ===")
+        else:
+            final_df = pd.DataFrame(mismatches)
+            print("\n=== TABLE MISMATCHES FOUND ===")
+            print(final_df.to_string(index=False))
+            
+            write_table_mismatches_to_vertica(vt_dev_conn, final_df)
+
+    except Exception as e:
+        print(f"\nAn unexpected error occurred in main_table execution: {e}")
+    finally:
+        if sf_conn:
+            sf_conn.close()
+            print("\nTable Snowflake connection closed.")
+        if vt_conn:
+            vt_conn.close()
+            print("Table Vertica source connection closed.")
+        if vt_dev_conn:
+            vt_dev_conn.close()
+            print("Table Vertica dev connection closed.")
+
+def main_views(config):
+    global VERTICA_HOST, VERTICA_USER, VERTICA_PASSWORD, VERTICA_DB
+    global VERTICA_HOST_DEV, VERTICA_USER_DEV, VERTICA_PASSWORD_DEV, VERTICA_DB_DEV
+    global URL_SF, KEYTAB_FILE_SDL_SF, PASSWORD_SDL_SF, DB_SDL_SF
+    global DB_SDL_SF_VW, SCHEMA_SDL_SF, USER_SDL_SF, WAREHOUSE_SDL_SF
+    global ROLE_SDL_SF, KEYTAB_DIR, DATA_DIR_VAR, SNOWFLAKE_JWT
+
+    VERTICA_HOST = config["VERTICA_HOST"]
+    VERTICA_USER = config["VERTICA_USER"]
+    VERTICA_PASSWORD = config["VERTICA_PASSWORD"]
+    VERTICA_DB = config["VERTICA_DB"]
+    VERTICA_HOST_DEV = config["VERTICA_HOST_DEV"]
+    VERTICA_USER_DEV = config["VERTICA_USER_DEV"]
+    VERTICA_PASSWORD_DEV = config["VERTICA_PASSWORD_DEV"]
+    VERTICA_DB_DEV = config["VERTICA_DB_DEV"]
+    URL_SF = config["URL_SF"]
+    KEYTAB_FILE_SDL_SF = config["KEYTAB_FILE_SDL_SF"]
+    PASSWORD_SDL_SF = config["PASSWORD_SDL_SF"]
+    DB_SDL_SF = config["DB_SDL_SF"]
+    DB_SDL_SF_VW = config["DB_SDL_SF_VW"]
+    SCHEMA_SDL_SF = config["SCHEMA_SDL_SF"]
+    USER_SDL_SF = config["USER_SDL_SF"]
+    WAREHOUSE_SDL_SF = config["WAREHOUSE_SDL_SF"]
+    ROLE_SDL_SF = config["ROLE_SDL_SF"]
+    KEYTAB_DIR = config["KEYTAB_DIR"]
+    DATA_DIR_VAR = config["DATA_DIR_VAR"]
+    SNOWFLAKE_JWT = config["SNOWFLAKE_JWT"]
+    sf_conn = None
+    vt_conn = None
+    vt_dev_conn = None
+
+    try:
+        sf_conn = connect_to_snowflake_for_views()
+        vt_conn = connect_to_vertica()
+        vt_dev_conn = connect_to_vertica_dev()
+
+        sf_views = get_snowflake_views(sf_conn, SCHEMA)
+        vt_views = get_vertica_views(vt_conn, SCHEMA)
+
+        sf_view_map = {normalize(t): t for t in sf_views}
+        vt_view_map = {normalize(t): t for t in vt_views}
+
+        sf_norm_set = set(sf_view_map.keys())
+        vt_norm_set = set(vt_view_map.keys())
+
+        mismatches = []
+        views_only_in_sf = sf_norm_set - vt_norm_set
+        views_only_in_vt = vt_norm_set - sf_norm_set
+
+        for norm_view in sorted(views_only_in_sf):
+            mismatches.append({
+                "ViewName": sf_view_map[norm_view],
+                "ColumnName": "N/A",
+                "ObjectType": "view",
+                "PresentInVertica": "N",
+                "PresentInSnowflake": "Y",
+            })
+
+        for norm_view in sorted(views_only_in_vt):
+            mismatches.append({
+                "ViewName": vt_view_map[norm_view],
+                "ColumnName": "N/A",
+                "ObjectType": "view",
+                "PresentInVertica": "Y",
+                "PresentInSnowflake": "N",
+            })
+
+        common_views = sorted(sf_norm_set.intersection(vt_norm_set))
+        print(f"\nFound {len(common_views)} common views to compare for column differences...")
+
+        for norm_view in common_views:
+            sf_view_name = sf_view_map[norm_view]
+            vt_view_name = vt_view_map[norm_view]
+
+            sf_cols = get_snowflake_columns(sf_conn, sf_view_name, SCHEMA)
+            vt_cols = get_vertica_view_columns(vt_conn, vt_view_name, SCHEMA)
+
+            sf_col_map = {normalize(col): col for col in sf_cols}
+            vt_col_map = {normalize(col): col for col in vt_cols}
+
+            sf_col_norm_set = set(sf_col_map.keys())
+            vt_col_norm_set = set(vt_col_map.keys())
+
+            cols_only_in_sf = sf_col_norm_set - vt_col_norm_set
+            cols_only_in_vt = vt_col_norm_set - sf_col_norm_set
+
+            for col_norm in sorted(cols_only_in_sf):
+                mismatches.append({
+                    "ViewName": sf_view_name,
+                    "ColumnName": sf_col_map[col_norm],
+                    "ObjectType": "viewcolumn",
+                    "PresentInVertica": "N",
+                    "PresentInSnowflake": "Y",
+                })
+
+            for col_norm in sorted(cols_only_in_vt):
+                 mismatches.append({
+                    "ViewName": sf_view_name,
+                    "ColumnName": vt_col_map[col_norm],
+                    "ObjectType": "viewcolumn",
+                    "PresentInVertica": "Y",
+                    "PresentInSnowflake": "N",
+                })
+        
+        if not mismatches:
+            print("\n=== VIEW COMPARISON COMPLETE: No mismatches found. ===")
+        else:
+            final_df = pd.DataFrame(mismatches)
+            print("\n=== VIEW MISMATCHES FOUND ===")
+            print(final_df.to_string(index=False))
+
+            write_view_mismatches_to_vertica(vt_dev_conn, final_df)
+
+    except Exception as e:
+        print(f"\nAn unexpected error occurred in main_views execution: {e}")
+    finally:
+        if sf_conn:
+            sf_conn.close()
+            print("\nView Snowflake connection closed.")
+        if vt_conn:
+            vt_conn.close()
+            print("View Vertica source connection closed.")
+        if vt_dev_conn:
+            vt_dev_conn.close()
+            print("View Vertica dev connection closed.")
+
+# --- Execution Block ---
+if __name__ == "__main__":
+    # These variables must be populated by the execution environment (e.g., shell environment variables)
+    # The original file (File 1) implies these are pre-existing in the script's namespace.
+    # For a runnable example, you would replace these with actual values or load them.
+    # For example:
+    # from dotenv import load_dotenv
+    # load_dotenv()
+    # VERTICA_HOST = os.getenv("VERTICA_HOST")
+    
+    config = {
+        "VERTICA_HOST": VERTICA_HOST,
+        "VERTICA_USER": VERTICA_USER,
+        "VERTICA_PASSWORD": VERTICA_PASSWORD,
+        "VERTICA_DB": VERTICA_DB,
+        "VERTICA_HOST_DEV": VERTICA_HOST_DEV,
+        "VERTICA_USER_DEV": VERTICA_USER_DEV,
+        "VERTICA_PASSWORD_DEV": VERTICA_PASSWORD_DEV,
+        "VERTICA_DB_DEV": VERTICA_DB_DEV,
+        "URL_SF": URL_SF,
+        "KEYTAB_FILE_SDL_SF": KEYTAB_FILE_SDL_SF,
+        "PASSWORD_SDL_SF": PASSWORD_SDL_SF,
+        "DB_SDL_SF": DB_SDL_SF,
+        "DB_SDL_SF_VW": DB_SDL_SF_VW,
+        "SCHEMA_SDL_SF": SCHEMA_SDL_SF,
+        "USER_SDL_SF": USER_SDL_SF,
+        "WAREHOUSE_SDL_SF": WAREHOUSE_SDL_SF,
+        "ROLE_SDL_SF": ROLE_SDL_SF,
+        "KEYTAB_DIR": KEYTAB_DIR,
+        "DATA_DIR_VAR": DATA_DIR_VAR,
+        "SNOWFLAKE_JWT": "SNOWFLAKE_JWT"
+    }
+
+    print("--- Starting Table Comparison ---")
+    main_table(config)
+    print("\n--- Starting View Comparison ---")
+    main_views(config)
+        
+    print("\nSuccessful")
+    outvar='script successful'
