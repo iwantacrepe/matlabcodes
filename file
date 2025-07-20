@@ -1,283 +1,119 @@
 import tkinter as tk
-from tkinter import ttk, messagebox, font
+from tkinter import messagebox
 import pandas as pd
-import os
 
-class MigrationConfiguratorApp:
+# Load the input Excel
+input_file = 'ui\input_tables.xlsx'
+df = pd.read_excel(input_file)
+
+# Output structure
+output = []
+
+# Group tables
+tables = df.groupby('table_name')
+
+class FlagSelector:
     def __init__(self, root):
         self.root = root
-        self.root.title("Data Migration Validation Configurator")
-        self.root.geometry("750x650")
-        self.root.minsize(700, 600)
-
-        self.table_data = {}
-        self.table_names = []
+        self.root.title("Table Flag UI")
         self.current_table_index = 0
-        self.output_records = [] # Holds records for the current table only
-        self.column_vars = [] 
-        self.is_table_staged = False
+        self.tables = list(tables.groups.keys())
+        self.selected_flag = tk.StringVar(value="")
+        self.selected_columns = []
 
-        self.input_file = 'input_tables.xlsx'
-        self.output_file = 'output_config.xlsx'
+        # UI Elements
+        self.title_label = tk.Label(root, text="", font=("Helvetica", 14, "bold"))
+        self.title_label.pack(pady=10)
 
-        self.setup_styles()
-        self.create_widgets()
-        
-        self.check_and_create_files()
-        self.load_data()
+        self.radio_frame = tk.Frame(root)
+        self.radio_key = tk.Radiobutton(self.radio_frame, text="Key", variable=self.selected_flag, value="key")
+        self.radio_exclude = tk.Radiobutton(self.radio_frame, text="Exclude", variable=self.selected_flag, value="exclude")
+        self.radio_stage = tk.Radiobutton(self.radio_frame, text="Stage", variable=self.selected_flag, value="stage")
+        self.radio_key.pack(side="left", padx=20)
+        self.radio_exclude.pack(side="left", padx=20)
+        self.radio_stage.pack(side="left", padx=20)
+        self.radio_frame.pack()
 
-    def setup_styles(self):
-        """Configures the visual style for the ttk widgets."""
-        self.style = ttk.Style(self.root)
-        self.style.theme_use('clam')
+        self.column_listbox = tk.Listbox(root, selectmode=tk.MULTIPLE, height=10, exportselection=False)
+        self.column_listbox.pack(pady=10)
 
-        self.title_font = font.Font(family="Helvetica", size=16, weight="bold")
-        self.label_font = font.Font(family="Helvetica", size=12)
-        self.bold_label_font = font.Font(family="Helvetica", size=12, weight="bold")
-        self.log_font = font.Font(family="Courier", size=10)
+        self.ok_button = tk.Button(root, text="OK", command=self.apply_flag)
+        self.ok_button.pack(pady=5)
 
-        self.style.configure('TFrame', background='#f0f0f0')
-        self.style.configure('TLabel', background='#f0f0f0', font=self.label_font)
-        self.style.configure('Title.TLabel', font=self.title_font, foreground='#333')
-        self.style.configure('Header.TLabel', font=self.bold_label_font, foreground='#003366')
-        self.style.configure('TRadiobutton', background='#f0f0f0', font=self.label_font)
-        self.style.configure('TCheckbutton', background='#f0f0f0', font=self.label_font)
-        self.style.configure('TButton', font=self.label_font, padding=6)
-        self.style.map('TButton',
-            foreground=[('active', 'white'), ('!disabled', '#333')],
-            background=[('active', '#0078d7'), ('!disabled', '#e0e0e0')]
-        )
-        self.style.configure('Success.TButton', background='#28a745', foreground='white')
-        self.style.map('Success.TButton', background=[('active', '#218838')])
+        self.next_button = tk.Button(root, text="Next Table", command=self.next_table)
+        self.next_button.pack(pady=5)
 
-    def check_and_create_files(self):
-        """Checks for input/output files and creates them with sample data if not found."""
-        if not os.path.exists(self.input_file):
-            messagebox.showinfo("File Not Found", f"'{self.input_file}' not found. A sample file will be created.")
-            sample_data = {
-                'table_name': ['customers', 'customers', 'customers', 'orders', 'orders', 'products', 'products'],
-                'column_name': ['customer_id', 'first_name', 'email', 'order_id', 'customer_id', 'product_id', 'product_name']
-            }
-            pd.DataFrame(sample_data).to_excel(self.input_file, index=False)
-        
-        if not os.path.exists(self.output_file):
-            pd.DataFrame(columns=['table_name', 'flag', 'column_name']).to_excel(self.output_file, index=False)
+        self.log_text = tk.Text(root, height=10, width=80, state="disabled", bg="#f4f4f4")
+        self.log_text.pack(pady=10)
 
-    def create_widgets(self):
-        """Creates and lays out all the GUI widgets."""
-        main_frame = ttk.Frame(self.root, padding="20")
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        self.quit_button = tk.Button(root, text="Finish & Save", command=self.finish_and_save)
+        self.quit_button.pack(pady=10)
 
-        top_frame = ttk.Frame(main_frame, padding="10")
-        top_frame.pack(fill=tk.X, pady=(0, 10))
-        top_frame.columnconfigure(1, weight=1)
-        
-        ttk.Label(top_frame, text="Current Table:", style='Header.TLabel').grid(row=0, column=0, sticky="w", pady=(0,10))
-        self.table_name_label = ttk.Label(top_frame, text="...", style='Title.TLabel')
-        self.table_name_label.grid(row=0, column=1, sticky="w", pady=(0,10))
+        self.load_table()
 
-        ttk.Label(top_frame, text="Select Flag:", style='Header.TLabel').grid(row=1, column=0, sticky="w", pady=(5,10))
-        self.flag_var = tk.StringVar()
-        self.flag_frame = ttk.Frame(top_frame)
-        self.flag_frame.grid(row=1, column=1, sticky="w")
-        ttk.Radiobutton(self.flag_frame, text="Key", variable=self.flag_var, value="key", command=self.on_flag_change).pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(self.flag_frame, text="Exclude", variable=self.flag_var, value="exclude", command=self.on_flag_change).pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(self.flag_frame, text="Stage (Skip Table)", variable=self.flag_var, value="stage", command=self.on_flag_change).pack(side=tk.LEFT, padx=5)
-
-        columns_outer_frame = ttk.Frame(main_frame)
-        columns_outer_frame.pack(fill=tk.BOTH, expand=True, pady=10)
-        ttk.Label(columns_outer_frame, text="Select Columns (if applicable):", style='Header.TLabel').pack(anchor="w", padx=10)
-        
-        canvas = tk.Canvas(columns_outer_frame, bg='#ffffff', highlightthickness=0)
-        scrollbar = ttk.Scrollbar(columns_outer_frame, orient="vertical", command=canvas.yview)
-        self.columns_frame = ttk.Frame(canvas, style='TFrame')
-        self.columns_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=self.columns_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.pack(side="left", fill="both", expand=True, padx=(10,0), pady=5)
-        scrollbar.pack(side="right", fill="y", padx=(0,10), pady=5)
-
-        action_frame = ttk.Frame(main_frame)
-        action_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(10, 0))
-        action_frame.columnconfigure((0, 1, 2, 3), weight=1)
-
-        self.prev_button = ttk.Button(action_frame, text="Previous Table", command=self.previous_table)
-        self.prev_button.grid(row=0, column=0, padx=5, sticky="ew")
-
-        self.apply_button = ttk.Button(action_frame, text="Apply Selections", command=self.apply_selection)
-        self.apply_button.grid(row=0, column=1, padx=5, sticky="ew")
-
-        self.next_button = ttk.Button(action_frame, text="Next Table", command=self.next_table)
-        self.next_button.grid(row=0, column=2, padx=5, sticky="ew")
-        
-        self.finish_button = ttk.Button(action_frame, text="Finish & Save", command=self.finalize_process, style='Success.TButton')
-        self.finish_button.grid(row=0, column=3, padx=5, sticky="ew")
-
-        log_frame = ttk.LabelFrame(main_frame, text="Log", padding=10)
-        log_frame.pack(fill=tk.BOTH, expand=True, side=tk.BOTTOM, pady=(15,0))
-        self.log_text = tk.Text(log_frame, height=8, wrap=tk.WORD, state=tk.DISABLED, font=self.log_font, bg="#fdfdfd", relief=tk.SOLID, borderwidth=1)
-        self.log_text.pack(fill=tk.BOTH, expand=True)
-
-    def log_message(self, message, level="INFO"):
-        self.log_text.config(state=tk.NORMAL)
-        self.log_text.insert(tk.END, f"[{level}] {message}\n")
-        self.log_text.config(state=tk.DISABLED)
-        self.log_text.see(tk.END)
-
-    def load_data(self):
-        try:
-            df = pd.read_excel(self.input_file)
-            if 'table_name' not in df.columns or 'column_name' not in df.columns:
-                messagebox.showerror("Error", "Input Excel must contain 'table_name' and 'column_name' columns.")
-                self.root.quit()
-                return
-            
-            self.table_data = df.groupby('table_name')['column_name'].apply(list).to_dict()
-            self.table_names = list(self.table_data.keys())
-
-            if not self.table_names:
-                messagebox.showerror("Error", "No data found in the input file.")
-                self.apply_button.config(state=tk.DISABLED)
-                self.next_button.config(state=tk.DISABLED)
-            else:
-                self.display_current_table()
-                self.log_message(f"Successfully loaded {len(self.table_names)} tables from '{self.input_file}'.")
-
-        except Exception as e:
-            messagebox.showerror("Error", f"An error occurred while loading data: {e}")
-            self.root.quit()
-
-    def display_current_table(self):
-        """Updates the UI to show the current table and its columns."""
-        for widget in self.columns_frame.winfo_children():
-            widget.destroy()
-        self.column_vars.clear()
-        self.is_table_staged = False
-
-        self.prev_button.config(state=tk.NORMAL if self.current_table_index > 0 else tk.DISABLED)
-        self.next_button.config(state=tk.NORMAL)
-        self.apply_button.config(state=tk.NORMAL)
-
-        table_name = self.table_names[self.current_table_index]
-        columns = self.table_data[table_name]
-        self.table_name_label.config(text=table_name)
-        self.log_message(f"--- Now processing table: '{table_name}' ---")
-
-        for i, col in enumerate(columns):
-            var = tk.IntVar()
-            cb = ttk.Checkbutton(self.columns_frame, text=col, variable=var)
-            cb.grid(row=i, column=0, sticky='w', padx=10, pady=2)
-            self.column_vars.append((var, col))
-        
-        self.reset_ui_for_new_selection()
-
-    def reset_ui_for_new_selection(self):
-        """Resets flags and checkboxes for a new selection on the same table."""
-        self.flag_var.set("")
-        for var, _ in self.column_vars:
-            var.set(0)
-        self.on_flag_change()
-        
-        self.apply_button.config(state=tk.NORMAL)
-        for child in self.flag_frame.winfo_children():
-            child.config(state=tk.NORMAL) # type: ignore[attr-defined]
-
-    def on_flag_change(self):
-        selected_flag = self.flag_var.get()
-        state = tk.NORMAL if selected_flag in ["key", "exclude"] else tk.DISABLED
-        for widget in self.columns_frame.winfo_children():
-            if isinstance(widget, ttk.Checkbutton):
-                widget.config(state=state)
-
-    def apply_selection(self):
-        """Validates user selection and records it in memory for the current table."""
-        flag = self.flag_var.get()
-        if not flag:
-            messagebox.showwarning("Selection Missing", "You must select a flag before applying.")
+    def load_table(self):
+        self.column_listbox.delete(0, tk.END)
+        if self.current_table_index >= len(self.tables):
+            self.title_label.config(text="All tables processed.")
             return
 
-        table_name = self.table_names[self.current_table_index]
-        selected_columns = [col_name for var, col_name in self.column_vars if var.get() == 1]
-        if flag in ["key", "exclude"] and not selected_columns:
-            messagebox.showwarning("Selection Missing", f"You must select one or more columns to mark as '{flag}'.")
+        self.selected_flag.set("")
+        self.selected_columns = []
+
+        table = self.tables[self.current_table_index]
+        self.title_label.config(text=f"Table: {table}")
+        columns = tables.get_group(table)['column_name'].tolist()
+        for col in columns:
+            self.column_listbox.insert(tk.END, col)
+
+    def apply_flag(self):
+        flag = self.selected_flag.get()
+        selected_indices = self.column_listbox.curselection()
+        table = self.tables[self.current_table_index]
+
+        # Error Checks
+        if not flag:
+            messagebox.showerror("Error", "Please select a flag.")
+            return
+        if flag != "stage" and not selected_indices:
+            messagebox.showerror("Error", "Please select at least one column.")
             return
 
         if flag == "stage":
-            self.output_records.append({'table_name': table_name, 'flag': 'stage', 'column_name': None})
-            self.log_message(f"Table '{table_name}' marked as 'stage'. It will be skipped.", "SUCCESS")
-            self.is_table_staged = True
-            self.apply_button.config(state=tk.DISABLED)
-            for child in self.flag_frame.winfo_children():
-                child.config(state=tk.DISABLED) # type: ignore[attr-defined]
+            output.append({"table_name": table, "flag": "stage", "column_name": ""})
+            self.log(f"{table} marked as STAGE. All columns skipped.")
         else:
-            for col in selected_columns:
-                self.output_records.append({'table_name': table_name, 'flag': flag, 'column_name': col})
-                self.log_message(f"Column '{col}' in table '{table_name}' marked as '{flag}'.")
-            self.reset_ui_for_new_selection()
+            for idx in selected_indices:
+                col = self.column_listbox.get(idx)
+                output.append({"table_name": table, "flag": flag, "column_name": col})
+                self.log(f"{table} → {col} marked as {flag.upper()}.")
 
-    def save_records_to_excel(self, is_final=False):
-        """Appends records from memory to the Excel file."""
-        if not self.output_records:
-            if is_final:
-                messagebox.showwarning("Nothing to Save", "No new configurations were applied.")
-                return False
-            return True
-
-        try:
-            new_df = pd.DataFrame(self.output_records)
-            try:
-                existing_df = pd.read_excel(self.output_file)
-                combined_df = pd.concat([existing_df, new_df], ignore_index=True)
-            except (FileNotFoundError, ValueError):
-                combined_df = new_df
-            
-            combined_df.to_excel(self.output_file, index=False)
-            if self.output_records:
-                self.log_message(f"Saved {len(self.output_records)} new configurations to '{self.output_file}'.", "SUCCESS")
-            self.output_records.clear()
-            return True
-        except Exception as e:
-            messagebox.showerror("Save Error", f"Failed to save output file: {e}")
-            return False
-
-    def previous_table(self):
-        """Saves current work and moves to the previous table."""
-        self.save_records_to_excel()
-        if self.current_table_index > 0:
-            self.current_table_index -= 1
-            self.display_current_table()
-            self.log_message(f"Moved back to previous table.")
+        self.selected_flag.set("")
+        self.column_listbox.selection_clear(0, tk.END)
 
     def next_table(self):
-        """Saves current work and moves to the next table."""
-        self.save_records_to_excel()
-        if self.current_table_index < len(self.table_names) - 1:
+        if self.current_table_index < len(self.tables) - 1:
             self.current_table_index += 1
-            self.display_current_table()
+            self.load_table()
         else:
-            self.log_message("Reached the last table. You can go back, or click 'Finish & Save' to complete.", "INFO")
-            self.next_button.config(state=tk.DISABLED)
-            messagebox.showinfo(
-                "Process Complete",
-                "You have reached the last table.\n\n"
-                "You can still use the 'Previous Table' button to review or change earlier selections.\n\n"
-                "When you are finished, click 'Finish & Save' to generate the output file and exit."
-            )
+            self.title_label.config(text="✅ All tables done. Click Finish & Save.")
 
-    def finalize_process(self):
-        """Saves any final pending records and closes the application."""
-        if self.save_records_to_excel(is_final=True):
-            final_msg = f"Configuration complete! All data saved to '{self.output_file}'."
-            self.log_message(final_msg, "SUCCESS")
-            
-            self.table_name_label.config(text="All Done!")
-            for btn in [self.apply_button, self.next_button, self.prev_button]:
-                btn.config(state=tk.DISABLED)
-            
-            if messagebox.askokcancel("Success", f"{final_msg}\n\nDo you want to close the application?"):
-                self.root.quit()
+    def log(self, msg):
+        self.log_text.config(state="normal")
+        self.log_text.insert(tk.END, msg + "\n")
+        self.log_text.see(tk.END)
+        self.log_text.config(state="disabled")
 
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = MigrationConfiguratorApp(root)
-    root.mainloop()
+    def finish_and_save(self):
+        if not output:
+            messagebox.showwarning("Nothing Saved", "No selections were made.")
+            return
+        df_out = pd.DataFrame(output)
+        df_out.to_excel("output_flags.xlsx", index=False)
+        messagebox.showinfo("Saved", "All flags saved to output_flags.xlsx")
+        self.root.quit()
+
+# Run the app
+root = tk.Tk()
+app = FlagSelector(root)
+root.mainloop()
