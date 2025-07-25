@@ -1,1 +1,99 @@
+Of course. The issue you're encountering is a classic character encoding problem. Python's string slicing ([:255]) counts characters (Unicode code points), but Vertica, when using a VARCHAR(255) column with UTF-8 encoding, counts bytes. Multi-byte characters (like emojis, accented letters, or special symbols) can take up more than one byte each, causing the byte length to exceed 255 even if the character count is less.
+To fix this, you need to encode the string into bytes, trim the byte sequence, and then safely decode it back into a string.
+Here is the corrected code. The primary changes are the introduction of a new helper function, trim_to_bytes, and updating the format_value and compare_rows functions to use it.
+The Solution
+The fix involves two main steps:
+ * Create a trim_to_bytes helper function: This function will properly trim a string to a specified maximum byte length, handling multi-byte characters correctly.
+ * Update format_value and compare_rows: Modify these functions to use the new byte-trimming logic instead of the simple character slice [:255].
+Here are the specific code blocks to replace.
+1. New Helper Function: trim_to_bytes
+Add this new helper function alongside your other utility functions like is_datetime_type.
+def trim_to_bytes(s, max_bytes, encoding='utf-8'):
+    """
+    Trims a string to a maximum number of bytes, safely handling multi-byte characters.
+    """
+    # Encode the string into bytes
+    encoded_s = s.encode(encoding)
+    
+    # If the byte length is already within the limit, return the original string
+    if len(encoded_s) <= max_bytes:
+        return s
+        
+    # Otherwise, slice the byte string and decode it back to a string,
+    # ignoring any errors from a partially-cut multi-byte character at the end.
+    return encoded_s[:max_bytes].decode(encoding, errors='ignore')
+
+
+2. Modified format_value Function
+Replace your existing format_value function with this updated version that incorporates the byte trimming.
+def format_value(val, max_db_bytes=255):
+    """
+    Formats a value for insertion into the results table, ensuring it is trimmed
+    to the specified byte length to prevent database errors.
+    """
+    if pd.isna(val):
+        return "NULL"
+    
+    # Convert value to string
+    val_str = str(val)
+    
+    # Trim the string to the max byte length required by the database
+    return trim_to_bytes(val_str, max_db_bytes)
+
+3. Modified compare_rows Function
+Now, update the compare_rows function. The logic becomes much cleaner as you no longer need to perform the trimming and null checks inline.
+def compare_rows(df, compare_cols, keys, table):
+    """Compares rows in a merged DataFrame and identifies mismatches."""
+    mismatches = []
+    for _, row in df.iterrows():
+        row_keys = ", ".join([
+            format_value(row.get(f"{k}_sf"), max_db_bytes=1000) if not pd.isna(row.get(f"{k}_sf"))
+            else format_value(row.get(f"{k}_vt"), max_db_bytes=1000) for k in keys
+        ])
+
+        is_entirely_missing_in_vt = all(is_empty(row.get(f"{col}_vt")) for col in compare_cols) and any(not is_empty(row.get(f"{col}_sf")) for col in compare_cols)
+        is_entirely_missing_in_sf = all(is_empty(row.get(f"{col}_sf")) for col in compare_cols) and any(not is_empty(row.get(f"{col}_vt")) for col in compare_cols)
+        
+        if is_entirely_missing_in_vt:
+            mismatches.append({
+                "TableName": table,
+                "ColumnName": "Row is Missing",
+                "ValueInVertica": "Missing in Vertica",
+                "ValueInSnowflake": "Present",
+                "Key": row_keys
+            })
+            continue
+
+        if is_entirely_missing_in_sf:
+            mismatches.append({
+                "TableName": table,
+                "ColumnName": "Row is Missing",
+                "ValueInVertica": "Present",
+                "ValueInSnowflake": "Missing in Snowflake",
+                "Key": row_keys
+            })
+            continue
+
+        for col in compare_cols:
+            val_sf = row.get(f"{col}_sf")
+            val_vt = row.get(f"{col}_vt")
+
+            if pd.isna(val_sf) and pd.isna(val_vt):
+                continue
+
+            if pd.isna(val_sf) != pd.isna(val_vt) or (
+                not pd.isna(val_sf) and not pd.isna(val_vt) and
+                str(val_sf).strip().casefold() != str(val_vt).strip().casefold()
+            ):
+                mismatches.append({
+                    "TableName": table,
+                    "ColumnName": col,
+                    # The format_value function now handles the trimming to 255 bytes by default
+                    "ValueInVertica": format_value(val_vt),
+                    "ValueInSnowflake": format_value(val_sf),
+                    "Key": row_keys
+                })
+
+    return mismatches
+
 
