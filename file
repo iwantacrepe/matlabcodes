@@ -1,10 +1,9 @@
-Of course. To address the memory issue, you can dynamically calculate the BATCH_SIZE for each table based on the number of columns being fetched. The logic is to maintain a relatively constant "data load" per batch (rows × columns).
-Here is the code modified to dynamically adjust the batch size.
-1. New Constants and Function for Dynamic Sizing
-First, let's define the baseline parameters at the top of your script and add a new function to perform the calculation. This new function, calculate_dynamic_batch_size, will compute the appropriate batch size, ensuring it doesn't become too small or exceed the original maximum.
-Place these near your other constants:
+Of course. Here are the necessary modifications to your view comparison script to implement a dynamic batch size, which will help manage memory usage effectively.
+The approach is identical to the previous script: we'll add a helper function and some constants to calculate the batch size based on the number of columns being processed for each view.
+1. New Constants and Helper Function
+First, add these new constants and the calculate_dynamic_batch_size function to the top of your script, near the other configuration variables.
 # --- New constants for dynamic batch sizing ---
-BASELINE_BATCH_SIZE = 100000  # Your original size that works for 50 columns
+BASELINE_BATCH_SIZE = 100000  # Your original size that works for ~50 columns
 BASELINE_COLS = 50            # The number of columns the baseline size is based on
 MIN_BATCH_SIZE = 5000         # A minimum size to prevent too many small queries
 
@@ -22,70 +21,68 @@ def calculate_dynamic_batch_size(num_columns):
     # Calculate the new batch size
     dynamic_size = int(target_data_load / num_columns)
 
-    # Ensure the batch size doesn't go below the minimum or above the original maximum
-    # This prevents excessively small batches for tables with many columns
-    # and oversized batches for tables with very few columns.
+    # Ensure the batch size is within a reasonable range
     return max(MIN_BATCH_SIZE, min(dynamic_size, BASELINE_BATCH_SIZE))
 
-2. Modified compare_table Function
-Next, modify the compare_table function to use this new logic. You'll calculate the number of columns being fetched for a table and then call calculate_dynamic_batch_size to get the appropriate batch size for that table's processing loop.
-Here are the changes integrated into your compare_table function:
-def compare_table(table, config_df, sf_conn, vt_conn, vt_dev_conn, summary):
-    """Main function to compare data for a single table between Snowflake and Vertica."""
-    print(f"--- Starting comparison for table: {table} ---")
-    sub = config_df[config_df["Table Name"].str.casefold() == table.casefold()]
+2. Modified compare_view Function
+Next, update the compare_view function to use this new logic. The changes involve calculating the dynamic batch size after determining the columns to compare and then using that size in the data fetching loop.
+def compare_view(view_name, config_df, sf_conn, vt_conn, vt_dev_conn, summary):
+    """Main function to compare data for a single view between Snowflake and Vertica."""
+    print(f"--- Starting comparison for view: {view_name} ---")
+    sub = config_df[config_df["Table Name"].str.casefold() == view_name.casefold()]
     if (sub["Flag"].str.casefold() == "stage").any():
-        summary.append(f"Table '{table}': Skipped (Flagged as 'stage')")
-        print(f"Skipping table '{table}' as it is flagged as 'stage'.")
+        summary.append(f"View '{view_name}': Skipped (Flagged as 'stage')")
+        print(f"Skipping view '{view_name}' as it is flagged as 'stage'.")
         return
 
     key_cols = sub[sub["Flag"].str.casefold() == "key"]["Column Name"].tolist()
-    exclude_cols = sub[sub["Flag"].str.casefold() == "exclude"]["Column Name"].tolist()
+    exclude_cols_from_config = sub[sub["Flag"].str.casefold() == "exclude"]["Column Name"].tolist()
+    default_exclude_cols = ["INSRT_TS", "UPDT_TS","ETL_TRNS","ETL_JOB","INSRT_TR","INSRT_JB","CREATION_DATE_TIME","UPDT_TR","UPDT_JB","LAST_UPDATED_DATE"]
+    final_excludes = list(set(exclude_cols_from_config) | set(default_exclude_cols))
+
     filter_cols = sub[sub["Flag"].str.casefold() == "filter"]["Column Name"].tolist()
     filter_col = filter_cols[0] if filter_cols else None
-    
+
     if filter_col:
         print(f"[INFO] Applying filter on column '{filter_col}' from '{START_DATETIME}'.")
 
     if not key_cols:
-        summary.append(f"Table '{table}': Skipped (No key columns defined in config)")
-        print(f"Skipping table '{table}' because no key columns were defined.")
+        summary.append(f"View '{view_name}': Skipped (No key columns defined in config)")
+        print(f"Skipping view '{view_name}' because no key columns were defined.")
         return
-    
-    print(f"[INFO] Checking row counts for table '{table}'...")
-    # ... (rest of the row count logic remains the same) ...
-    sf_count = get_row_count(sf_conn, table, SCHEMA, filter_col, START_DATETIME)
-    vt_count = get_row_count(vt_conn, table, SCHEMA, filter_col, START_DATETIME)
+
+    # ... (The row count and empty view check logic remains the same) ...
+    print(f"[INFO] Checking row counts for view '{view_name}'...")
+    sf_count = get_row_count(sf_conn, view_name, SCHEMA, filter_col, START_DATETIME)
+    vt_count = get_row_count(vt_conn, view_name, SCHEMA, filter_col, START_DATETIME)
     print(f"[INFO] Snowflake count: {sf_count}, Vertica count: {vt_count}")
 
     data_to_insert = None
     if sf_count == 0 and vt_count > 0:
-        summary.append(f"Table '{table}': Logged as empty in Snowflake (Vertica has {vt_count} rows)")
-        print(f"[!!] Table '{table}' is empty in Snowflake but not in Vertica. Logging this and skipping comparison.")
-        data_to_insert = [(table, 'EmptyTable', f'{vt_count} rows', 'Empty', 'Table is empty in Snowflake')]
+        summary.append(f"View '{view_name}': Logged as empty in Snowflake (Vertica has {vt_count} rows)")
+        print(f"[!!] View '{view_name}' is empty in Snowflake but not in Vertica. Logging this and skipping comparison.")
+        data_to_insert = [(view_name, 'EmptyView', f'{vt_count} rows', 'Empty', 'View is empty in Snowflake')]
     elif vt_count == 0 and sf_count > 0:
-        summary.append(f"Table '{table}': Logged as empty in Vertica (Snowflake has {sf_count} rows)")
-        print(f"[!!] Table '{table}' is empty in Vertica but not in Snowflake. Logging this and skipping comparison.")
-        data_to_insert = [(table, 'EmptyTable', 'Empty', f'{sf_count} rows', 'Table is empty in Vertica')]
+        summary.append(f"View '{view_name}': Logged as empty in Vertica (Snowflake has {sf_count} rows)")
+        print(f"[!!] View '{view_name}' is empty in Vertica but not in Snowflake. Logging this and skipping comparison.")
+        data_to_insert = [(view_name, 'EmptyView', 'Empty', f'{sf_count} rows', 'View is empty in Vertica')]
     elif sf_count == 0 and vt_count == 0:
-        summary.append(f"Table '{table}': Skipped (Empty in both sources)")
-        print(f"Skipping table '{table}' as it's empty in both Snowflake and Vertica.")
+        summary.append(f"View '{view_name}': Skipped (Empty in both sources)")
+        print(f"Skipping view '{view_name}' as it's empty in both Snowflake and Vertica.")
         return
-
     if data_to_insert:
         insert_query = """
-            INSERT INTO ER1.vertica_snowflake_table_data_comparison
-            (table_name, column_name, value_in_vertica, value_in_snowflake, unique_key)
+            INSERT INTO ER1.vertica_snowflake_view_data_comparison
+            (view_name, column_name, value_in_vertica, value_in_snowflake, unique_key)
             VALUES (%s, %s, %s, %s, %s)
         """
         with vt_dev_conn.cursor() as cur:
             cur.executemany(insert_query, data_to_insert)
         return
-        
-  
-    sf_cols_map = get_snowflake_columns_and_types(sf_conn, table)
-    vt_cols_map = get_vertica_columns_and_types(vt_conn, table)
-    
+
+    sf_cols_map = get_columns_and_types(sf_conn, view_name, dbtype="snowflake")
+    vt_cols_map = get_columns_and_types(vt_conn, view_name, dbtype="vertica")
+
     sf_cols = list(sf_cols_map.keys())
     vt_cols = list(vt_cols_map.keys())
 
@@ -96,15 +93,18 @@ def compare_table(table, config_df, sf_conn, vt_conn, vt_dev_conn, summary):
     all_cols = list(set(sf_cols + vt_cols))
 
     keys = resolve_columns(key_cols, all_cols, force_upper=True)
-    excludes_from_excel = resolve_columns(exclude_cols, all_cols, force_upper=True) if exclude_cols else []
-    final_excludes = list(set(excludes_from_excel) | set(DEFAULT_EXCLUDE_COLS))
-    compare_cols = [col for col in common_cols if col.upper() not in keys + final_excludes]
- 
+    
+    compare_cols = [
+        col for col in common_cols if col.upper() not in keys and col.casefold() not in [e.casefold() for e in final_excludes]
+    ]
+
     # ---- DYNAMIC BATCH SIZE CALCULATION ----
     total_cols_to_fetch = len(keys) + len(compare_cols)
     dynamic_batch_size = calculate_dynamic_batch_size(total_cols_to_fetch)
     print(f"[INFO] Dynamically calculated batch size: {dynamic_batch_size} for {total_cols_to_fetch} total columns.")
     # ---- END DYNAMIC CALCULATION ----
+
+    print(f"[DEBUG] Comparing {len(compare_cols)} columns for view '{view_name}'.")
 
     def fetch_df_batch(conn, dbtype, limit, offset):
         # ... (this inner function remains exactly the same) ...
@@ -119,7 +119,7 @@ def compare_table(table, config_df, sf_conn, vt_conn, vt_dev_conn, summary):
             else:
                 select_expressions.append(f'"{original_col_name}" AS "{c}"')
         col_str = ", ".join(select_expressions)
-        query = f'SELECT {col_str} FROM "{SCHEMA}"."{table}"'
+        query = f'SELECT {col_str} FROM "{SCHEMA}"."{view_name}"'
         params = ()
         if filter_col:
             query += f' WHERE "{filter_col}" >= %s'
@@ -133,16 +133,15 @@ def compare_table(table, config_df, sf_conn, vt_conn, vt_dev_conn, summary):
             return pd.DataFrame(cur.fetchall(), columns=columns)
 
     offset = 0
-    mismatches_found_for_table = False
+    mismatches_found_for_view = False
     while True:
-        print(f"[INFO] Fetching batch for table '{table}' with offset {offset}...")
+        print(f"[INFO] Fetching batch for view '{view_name}' with offset {offset}...")
         # ---- USE THE DYNAMIC BATCH SIZE ----
         df_sf = fetch_df_batch(sf_conn, "snowflake", dynamic_batch_size, offset)
         df_vt = fetch_df_batch(vt_conn, "vertica", dynamic_batch_size, offset)
-        # ---- END CHANGE ----
-        
+
         if df_sf.empty and df_vt.empty:
-            print(f"[INFO] No more data to fetch for table '{table}'.")
+            print(f"[INFO] No more data to fetch for view '{view_name}'.")
             break
 
         df_sf = df_sf.add_suffix("_sf")
@@ -153,34 +152,32 @@ def compare_table(table, config_df, sf_conn, vt_conn, vt_dev_conn, summary):
                           right_on=[f"{k}_vt" for k in keys],
                           how='outer')
 
-        mismatches = compare_rows(merged, compare_cols, keys, table)
+        mismatches = compare_rows(merged, compare_cols, keys, view_name)
 
         if mismatches:
-            mismatches_found_for_table = True
+            mismatches_found_for_view = True
             print(f"[!!] Found {len(mismatches)} mismatches in this batch. Writing to database.")
-            
+
             data_to_insert = [
-                (m['TableName'], m['ColumnName'], m['ValueInVertica'], m['ValueInSnowflake'], m['Key'])
+                (m['ViewName'], m['ColumnName'], m['ValueInVertica'], m['ValueInSnowflake'], m['Key'])
                 for m in mismatches
             ]
-            
+
             insert_query = """
-                INSERT INTO ER1.vertica_snowflake_table_data_comparison
-                (table_name, column_name, value_in_vertica, value_in_snowflake, unique_key)
+                INSERT INTO ER1.vertica_snowflake_view_data_comparison
+                (view_name, column_name, value_in_vertica, value_in_snowflake, unique_key)
                 VALUES (%s, %s, %s, %s, %s)
             """
-            
+
             with vt_dev_conn.cursor() as cur:
                 cur.executemany(insert_query, data_to_insert)
 
         # ---- USE THE DYNAMIC BATCH SIZE FOR THE OFFSET ----
         offset += dynamic_batch_size
-        # ---- END CHANGE ----
 
-    if mismatches_found_for_table:
-        summary.append(f"Table '{table}': Mismatches found and written to the database.")
+    if mismatches_found_for_view:
+        summary.append(f"View '{view_name}': Mismatches found and written to the database.")
     else:
-        summary.append(f"Table '{table}': No mismatches found.")
-    print(f"--- Finished comparison for table: {table} ---\n")
-
+        summary.append(f"View '{view_name}': No mismatches found.")
+    print(f"--- Finished comparison for view: {view_name} ---\n")
 
