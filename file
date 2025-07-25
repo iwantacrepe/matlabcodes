@@ -1,13 +1,7 @@
-Of course. The issue you're encountering is a classic character encoding problem. Python's string slicing ([:255]) counts characters (Unicode code points), but Vertica, when using a VARCHAR(255) column with UTF-8 encoding, counts bytes. Multi-byte characters (like emojis, accented letters, or special symbols) can take up more than one byte each, causing the byte length to exceed 255 even if the character count is less.
-To fix this, you need to encode the string into bytes, trim the byte sequence, and then safely decode it back into a string.
-Here is the corrected code. The primary changes are the introduction of a new helper function, trim_to_bytes, and updating the format_value and compare_rows functions to use it.
-The Solution
-The fix involves two main steps:
- * Create a trim_to_bytes helper function: This function will properly trim a string to a specified maximum byte length, handling multi-byte characters correctly.
- * Update format_value and compare_rows: Modify these functions to use the new byte-trimming logic instead of the simple character slice [:255].
-Here are the specific code blocks to replace.
+lOf course. This script has the exact same character vs. byte length issue as the previous one. The solution is to apply the same logic: introduce a byte-aware trimming function and integrate it into your data formatting and comparison steps.
+Here are the necessary changes for your view comparison script.
 1. New Helper Function: trim_to_bytes
-Add this new helper function alongside your other utility functions like is_datetime_type.
+First, add this new helper function to your script. A good place is near your other utility functions like is_empty and format_value.
 def trim_to_bytes(s, max_bytes, encoding='utf-8'):
     """
     Trims a string to a maximum number of bytes, safely handling multi-byte characters.
@@ -20,12 +14,12 @@ def trim_to_bytes(s, max_bytes, encoding='utf-8'):
         return s
         
     # Otherwise, slice the byte string and decode it back to a string,
-    # ignoring any errors from a partially-cut multi-byte character at the end.
+    # ignoring errors from any partially-cut multi-byte character.
     return encoded_s[:max_bytes].decode(encoding, errors='ignore')
 
 
 2. Modified format_value Function
-Replace your existing format_value function with this updated version that incorporates the byte trimming.
+Next, replace your current format_value function with this updated version. It now incorporates the byte-trimming logic, making it robust for database insertions.
 def format_value(val, max_db_bytes=255):
     """
     Formats a value for insertion into the results table, ensuring it is trimmed
@@ -41,11 +35,12 @@ def format_value(val, max_db_bytes=255):
     return trim_to_bytes(val_str, max_db_bytes)
 
 3. Modified compare_rows Function
-Now, update the compare_rows function. The logic becomes much cleaner as you no longer need to perform the trimming and null checks inline.
-def compare_rows(df, compare_cols, keys, table):
+Finally, replace your compare_rows function. The updated version is cleaner because the new format_value function handles both null checks and byte trimming.
+def compare_rows(df, compare_cols, keys, view_name):
     """Compares rows in a merged DataFrame and identifies mismatches."""
     mismatches = []
     for _, row in df.iterrows():
+        # Using a larger byte limit for the key column to avoid accidental trimming.
         row_keys = ", ".join([
             format_value(row.get(f"{k}_sf"), max_db_bytes=1000) if not pd.isna(row.get(f"{k}_sf"))
             else format_value(row.get(f"{k}_vt"), max_db_bytes=1000) for k in keys
@@ -53,10 +48,10 @@ def compare_rows(df, compare_cols, keys, table):
 
         is_entirely_missing_in_vt = all(is_empty(row.get(f"{col}_vt")) for col in compare_cols) and any(not is_empty(row.get(f"{col}_sf")) for col in compare_cols)
         is_entirely_missing_in_sf = all(is_empty(row.get(f"{col}_sf")) for col in compare_cols) and any(not is_empty(row.get(f"{col}_vt")) for col in compare_cols)
-        
+
         if is_entirely_missing_in_vt:
             mismatches.append({
-                "TableName": table,
+                "ViewName": view_name,
                 "ColumnName": "Row is Missing",
                 "ValueInVertica": "Missing in Vertica",
                 "ValueInSnowflake": "Present",
@@ -66,7 +61,7 @@ def compare_rows(df, compare_cols, keys, table):
 
         if is_entirely_missing_in_sf:
             mismatches.append({
-                "TableName": table,
+                "ViewName": view_name,
                 "ColumnName": "Row is Missing",
                 "ValueInVertica": "Present",
                 "ValueInSnowflake": "Missing in Snowflake",
@@ -86,14 +81,13 @@ def compare_rows(df, compare_cols, keys, table):
                 str(val_sf).strip().casefold() != str(val_vt).strip().casefold()
             ):
                 mismatches.append({
-                    "TableName": table,
+                    "ViewName": view_name,
                     "ColumnName": col,
-                    # The format_value function now handles the trimming to 255 bytes by default
+                    # The format_value function now handles trimming to 255 bytes correctly
                     "ValueInVertica": format_value(val_vt),
                     "ValueInSnowflake": format_value(val_sf),
                     "Key": row_keys
                 })
-
     return mismatches
 
-
+By making these three changes, your script will now correctly handle strings with multi-byte characters and prevent the database insertion error. No additional module imports are required.
