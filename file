@@ -1,35 +1,57 @@
-Yes, you absolutely can, and it's an excellent way to simplify the Python code. You can modify the INSERT query to use Vertica's CAST function, which will automatically truncate the data to the specified size before insertion.
-This approach moves the trimming logic from Python to the database, which is often cleaner. Vertica's CAST(string AS VARCHAR(255)) is byte-aware, so it correctly handles the original problem of multi-byte characters.
-Step 1: Modify the INSERT Query
-You need to wrap the placeholders for the value columns with a CAST function. The unique_key column should be left as-is to avoid trimming important key information.
-For the compare_view script:
-Update the insert_query inside the compare_view function like this:
-            # The insert_query now uses CAST to let Vertica handle the trimming
-            insert_query = """
-                INSERT INTO ER1.vertica_snowflake_view_data_comparison
-                (view_name, column_name, value_in_vertica, value_in_snowflake, unique_key)
-                VALUES (%s, %s, CAST(%s AS VARCHAR(255)), CAST(%s AS VARCHAR(255)), %s)
-            """
 
-            with vt_dev_conn.cursor() as cur:
-                cur.executemany(insert_query, data_to_insert)
-
-For the compare_table script:
-You would make the same change to the query in your other script:
-            insert_query = """
-                INSERT INTO ER1.vertica_snowflake_table_data_comparison
-                (table_name, column_name, value_in_vertica, value_in_snowflake, unique_key)
-                VALUES (%s, %s, CAST(%s AS VARCHAR(255)), CAST(%s AS VARCHAR(255)), %s)
-            """
-
-Step 2: Simplify Your Python Code
-Now that Vertica handles the trimming, you can remove that logic from Python.
-1. Simplify the format_value function:
-It no longer needs to do any trimming. Change it back to a simple NULL check and string conversion.
-def format_value(val):
-    """Formats a value for insertion into the results table."""
-    return "NULL" if pd.isna(val) else str(val)
-
-2. Remove the trim_to_bytes function:
-You can now completely delete the trim_to_bytes helper function from your script, as it's no longer needed.
-This approach is cleaner, more efficient, and places the data conversion logic right where the constraint exists—in the database itself.
+Act as an expert business analyst creating a summary presentation for senior management.
+Create a 5-page PowerPoint presentation about a 2-month internship project. The presentation's goal is to showcase the business value of an automated data validation framework built to support a major database migration from Vertica to Snowflake.
+The tone should be professional and business-focused, not overly technical. Emphasize the "why" (the business problem) and the "so what" (the benefits and impact) rather than just the technical "how." Use a clean, modern design with relevant icons.
+Here is the content and structure for each of the 5 slides:
+Slide 1: Title Slide
+ * Title: De-Risking Our Data Future: An Automated Validation Framework for the Snowflake Migration
+ * Subtitle: Internship Project Showcase
+ * Presenter Name: [Your Name]
+ * Date: [Date of Presentation]
+ * Visual: Include the BNY Mellon, Vertica, and Snowflake logos.
+Slide 2: The Challenge & Our Strategic Solution
+ * Title: The High-Stakes Challenge of Data Migration
+ * Left Side - The Challenge (use a "problem" or "warning" icon):
+   * Migrating enterprise data from Vertica to Snowflake is a critical initiative, but it carries significant risks.
+   * Manual validation is not an option; it's too slow, prone to human error, and cannot scale to millions or billions of records.
+   * Key Business Questions: How can we guarantee that no data is lost or corrupted? How do we ensure our business reports remain accurate after migration?
+ * Right Side - The Solution (use a "solution" or "shield" icon):
+   * I developed a fully automated Data Comparison Framework using Python.
+   * This framework acts as a "digital auditor," systematically comparing the old and new databases to catch any errors before they impact the business.
+   * The Goal: To enable a fast, reliable, and risk-free migration, ensuring 100% data integrity and stakeholder confidence.
+Slide 3: How the Framework Guarantees Accuracy
+ * Title: A Three-Layered Approach to Data Trust
+ * Use three columns, each with a clear icon.
+ * Column 1: Schema Validation (use a "blueprint" or "structure" icon)
+   * What it does: Automatically compares the database "blueprints" (schemas, tables, and columns) between Vertica and Snowflake.
+   * Business Benefit: Prevents application failures and data loading errors by ensuring the new database structure is a perfect mirror of the old one.
+ * Column 2: Row-Level Data Verification (use a "magnifying glass" or "checklist" icon)
+   * What it does: Meticulously compares the actual data, row-by-row, to find any discrepancies, missing records, or corrupted values. It intelligently ignores non-essential fields like timestamps.
+   * Business Benefit: Provides definitive proof that customer and financial data is transferred with perfect accuracy, maintaining data integrity.
+ * Column 3: Business Logic (View) Comparison (use a "gears" or "logic" icon)
+   * What it does: Validates that complex data views—which often drive critical business reports—produce the exact same results in Snowflake as they did in Vertica.
+   * Business Benefit: Ensures continuity for business intelligence and reporting. Stakeholders can trust that their dashboards and analytics are correct post-migration.
+Slide 4: Impact and Value Delivered
+ * Title: Driving Efficiency and Reducing Risk
+ * Left Side - Key Features for Agility (use a "rocket" or "fast forward" icon):
+   * Fully Automated: Frees up hundreds of developer hours from tedious manual checking.
+   * Easily Configurable: The business or dev teams can easily control the validation rules using a simple Excel file—no code changes needed.
+   * Scalable by Design: Built to handle massive datasets by processing them in efficient batches.
+   * Centralized Mismatch Reporting: All discrepancies are automatically logged into a central audit table for fast resolution.
+ * Right Side - Core Business Impact (use a "bullseye" or "growth chart" icon):
+   * Accelerated Timelines: The speed of automated validation directly shortens the overall migration project timeline.
+   * Drastically Reduced Risk: Minimizes the chance of post-migration data issues, which can be incredibly costly to fix.
+   * Enhanced Stakeholder Confidence: Provides clear, data-driven proof that the migration is proceeding accurately and successfully.
+Slide 5: Visualizing Success & The Path Forward
+ * Title: From Data Points to Actionable Insights
+ * Left Side - Interactive Power BI Dashboard (Include a conceptual image of a clean, modern dashboard):
+   * Show a mock-up of a dashboard with key metrics:
+     * "Tables Validated: 158/160"
+     * "Data Mismatches: 12" (in red)
+     * "Schema Mismatches: 0" (in green)
+     * "Migration Health: 99.8% Accurate"
+   * Text: To make the results accessible to all stakeholders, I created Power BI visualizations. These dashboards provide a simple, at-a-glance view of the migration's status, highlighting any issues that need attention.
+ * Right Side - Conclusion & Key Takeaway:
+   * This automated framework is more than a tool for a single project; it is a reusable strategic asset for BNY.
+   * It establishes a best-practice for all future data migrations, ensuring they are consistently efficient, reliable, and secure.
+   * Final Statement: We have successfully transformed data validation from a manual bottleneck into an automated, value-driving process.
