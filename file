@@ -1,18 +1,186 @@
-You are absolutely right. Brevity is key for a powerful presentation slide. The text should be a headline that you can speak to, not a paragraph for the audience to read.
-Here are the same four points, condensed into much shorter, punchier versions perfect for a slide.
-Concise Content for Your Slide:
-Introductory Paragraph (shorter version):
-"Migrating our data from Vertica to Snowflake is a high-stakes initiative. A manual approach presents four unacceptable risks:"
-1. Impossible Scale
- * (Icon: A mountain)
- * Text: Manual checks simply cannot scale to millions of records, which guarantees errors will be missed.
-2. Silent Data Corruption
- * (Icon: A document with a red 'X')
- * Text: Subtle, hard-to-detect errors can corrupt critical data without any immediate warning signs, eroding trust.
-3. Business Disruption
- * (Icon: A broken chain link)
- * Text: Flawed data directly threatens the accuracy of our business reports, dashboards, and applications.
-4. High Costs & Inefficiency
- * (Icon: A clock with a dollar sign)
- * Text: Manual validation is a slow drain on valuable developer resources, and fixing errors post-migration is even more costly.
-Remember: You can use your speaking notes to elaborate on each of these points with the details from the previous version. The slide should just provide the hook.
+Of course. To address the memory issue, you can dynamically calculate the BATCH_SIZE for each table based on the number of columns being fetched. The logic is to maintain a relatively constant "data load" per batch (rows × columns).
+Here is the code modified to dynamically adjust the batch size.
+1. New Constants and Function for Dynamic Sizing
+First, let's define the baseline parameters at the top of your script and add a new function to perform the calculation. This new function, calculate_dynamic_batch_size, will compute the appropriate batch size, ensuring it doesn't become too small or exceed the original maximum.
+Place these near your other constants:
+# --- New constants for dynamic batch sizing ---
+BASELINE_BATCH_SIZE = 100000  # Your original size that works for 50 columns
+BASELINE_COLS = 50            # The number of columns the baseline size is based on
+MIN_BATCH_SIZE = 5000         # A minimum size to prevent too many small queries
+
+def calculate_dynamic_batch_size(num_columns):
+    """
+    Calculates batch size dynamically based on the number of columns to fetch.
+    The goal is to keep the total data points per batch (rows * cols) consistent.
+    """
+    if num_columns <= 0:
+        return BASELINE_BATCH_SIZE  # Return default if column count is invalid
+
+    # Calculate the target "data load" from the baseline
+    target_data_load = BASELINE_BATCH_SIZE * BASELINE_COLS
+
+    # Calculate the new batch size
+    dynamic_size = int(target_data_load / num_columns)
+
+    # Ensure the batch size doesn't go below the minimum or above the original maximum
+    # This prevents excessively small batches for tables with many columns
+    # and oversized batches for tables with very few columns.
+    return max(MIN_BATCH_SIZE, min(dynamic_size, BASELINE_BATCH_SIZE))
+
+2. Modified compare_table Function
+Next, modify the compare_table function to use this new logic. You'll calculate the number of columns being fetched for a table and then call calculate_dynamic_batch_size to get the appropriate batch size for that table's processing loop.
+Here are the changes integrated into your compare_table function:
+def compare_table(table, config_df, sf_conn, vt_conn, vt_dev_conn, summary):
+    """Main function to compare data for a single table between Snowflake and Vertica."""
+    print(f"--- Starting comparison for table: {table} ---")
+    sub = config_df[config_df["Table Name"].str.casefold() == table.casefold()]
+    if (sub["Flag"].str.casefold() == "stage").any():
+        summary.append(f"Table '{table}': Skipped (Flagged as 'stage')")
+        print(f"Skipping table '{table}' as it is flagged as 'stage'.")
+        return
+
+    key_cols = sub[sub["Flag"].str.casefold() == "key"]["Column Name"].tolist()
+    exclude_cols = sub[sub["Flag"].str.casefold() == "exclude"]["Column Name"].tolist()
+    filter_cols = sub[sub["Flag"].str.casefold() == "filter"]["Column Name"].tolist()
+    filter_col = filter_cols[0] if filter_cols else None
+    
+    if filter_col:
+        print(f"[INFO] Applying filter on column '{filter_col}' from '{START_DATETIME}'.")
+
+    if not key_cols:
+        summary.append(f"Table '{table}': Skipped (No key columns defined in config)")
+        print(f"Skipping table '{table}' because no key columns were defined.")
+        return
+    
+    print(f"[INFO] Checking row counts for table '{table}'...")
+    # ... (rest of the row count logic remains the same) ...
+    sf_count = get_row_count(sf_conn, table, SCHEMA, filter_col, START_DATETIME)
+    vt_count = get_row_count(vt_conn, table, SCHEMA, filter_col, START_DATETIME)
+    print(f"[INFO] Snowflake count: {sf_count}, Vertica count: {vt_count}")
+
+    data_to_insert = None
+    if sf_count == 0 and vt_count > 0:
+        summary.append(f"Table '{table}': Logged as empty in Snowflake (Vertica has {vt_count} rows)")
+        print(f"[!!] Table '{table}' is empty in Snowflake but not in Vertica. Logging this and skipping comparison.")
+        data_to_insert = [(table, 'EmptyTable', f'{vt_count} rows', 'Empty', 'Table is empty in Snowflake')]
+    elif vt_count == 0 and sf_count > 0:
+        summary.append(f"Table '{table}': Logged as empty in Vertica (Snowflake has {sf_count} rows)")
+        print(f"[!!] Table '{table}' is empty in Vertica but not in Snowflake. Logging this and skipping comparison.")
+        data_to_insert = [(table, 'EmptyTable', 'Empty', f'{sf_count} rows', 'Table is empty in Vertica')]
+    elif sf_count == 0 and vt_count == 0:
+        summary.append(f"Table '{table}': Skipped (Empty in both sources)")
+        print(f"Skipping table '{table}' as it's empty in both Snowflake and Vertica.")
+        return
+
+    if data_to_insert:
+        insert_query = """
+            INSERT INTO ER1.vertica_snowflake_table_data_comparison
+            (table_name, column_name, value_in_vertica, value_in_snowflake, unique_key)
+            VALUES (%s, %s, %s, %s, %s)
+        """
+        with vt_dev_conn.cursor() as cur:
+            cur.executemany(insert_query, data_to_insert)
+        return
+        
+  
+    sf_cols_map = get_snowflake_columns_and_types(sf_conn, table)
+    vt_cols_map = get_vertica_columns_and_types(vt_conn, table)
+    
+    sf_cols = list(sf_cols_map.keys())
+    vt_cols = list(vt_cols_map.keys())
+
+    sf_norm_map = {col.casefold(): col for col in sf_cols}
+    vt_norm_map = {col.casefold(): col for col in vt_cols}
+    common_norm = set(sf_norm_map.keys()) & set(vt_norm_map.keys())
+    common_cols = [sf_norm_map[n] for n in common_norm]
+    all_cols = list(set(sf_cols + vt_cols))
+
+    keys = resolve_columns(key_cols, all_cols, force_upper=True)
+    excludes_from_excel = resolve_columns(exclude_cols, all_cols, force_upper=True) if exclude_cols else []
+    final_excludes = list(set(excludes_from_excel) | set(DEFAULT_EXCLUDE_COLS))
+    compare_cols = [col for col in common_cols if col.upper() not in keys + final_excludes]
+ 
+    # ---- DYNAMIC BATCH SIZE CALCULATION ----
+    total_cols_to_fetch = len(keys) + len(compare_cols)
+    dynamic_batch_size = calculate_dynamic_batch_size(total_cols_to_fetch)
+    print(f"[INFO] Dynamically calculated batch size: {dynamic_batch_size} for {total_cols_to_fetch} total columns.")
+    # ---- END DYNAMIC CALCULATION ----
+
+    def fetch_df_batch(conn, dbtype, limit, offset):
+        # ... (this inner function remains exactly the same) ...
+        cols_to_fetch = keys + compare_cols
+        col_map = sf_cols_map if dbtype == "snowflake" else vt_cols_map
+        select_expressions = []
+        for c in cols_to_fetch:
+            original_col_name = next((k for k in col_map if k.casefold() == c.casefold()), c)
+            dtype = col_map.get(original_col_name)
+            if is_datetime_type(dtype):
+                select_expressions.append(f'"{original_col_name}"::DATE AS "{c}"')
+            else:
+                select_expressions.append(f'"{original_col_name}" AS "{c}"')
+        col_str = ", ".join(select_expressions)
+        query = f'SELECT {col_str} FROM "{SCHEMA}"."{table}"'
+        params = ()
+        if filter_col:
+            query += f' WHERE "{filter_col}" >= %s'
+            params = (START_DATETIME,)
+        order_by_str = ", ".join(f'"{k}"' for k in keys)
+        query += f' ORDER BY {order_by_str}'
+        query += f' LIMIT {limit} OFFSET {offset}'
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            columns = [desc[0].upper() for desc in cur.description] if cur.description else [c.upper() for c in cols_to_fetch]
+            return pd.DataFrame(cur.fetchall(), columns=columns)
+
+    offset = 0
+    mismatches_found_for_table = False
+    while True:
+        print(f"[INFO] Fetching batch for table '{table}' with offset {offset}...")
+        # ---- USE THE DYNAMIC BATCH SIZE ----
+        df_sf = fetch_df_batch(sf_conn, "snowflake", dynamic_batch_size, offset)
+        df_vt = fetch_df_batch(vt_conn, "vertica", dynamic_batch_size, offset)
+        # ---- END CHANGE ----
+        
+        if df_sf.empty and df_vt.empty:
+            print(f"[INFO] No more data to fetch for table '{table}'.")
+            break
+
+        df_sf = df_sf.add_suffix("_sf")
+        df_vt = df_vt.add_suffix("_vt")
+
+        merged = pd.merge(df_sf, df_vt,
+                          left_on=[f"{k}_sf" for k in keys],
+                          right_on=[f"{k}_vt" for k in keys],
+                          how='outer')
+
+        mismatches = compare_rows(merged, compare_cols, keys, table)
+
+        if mismatches:
+            mismatches_found_for_table = True
+            print(f"[!!] Found {len(mismatches)} mismatches in this batch. Writing to database.")
+            
+            data_to_insert = [
+                (m['TableName'], m['ColumnName'], m['ValueInVertica'], m['ValueInSnowflake'], m['Key'])
+                for m in mismatches
+            ]
+            
+            insert_query = """
+                INSERT INTO ER1.vertica_snowflake_table_data_comparison
+                (table_name, column_name, value_in_vertica, value_in_snowflake, unique_key)
+                VALUES (%s, %s, %s, %s, %s)
+            """
+            
+            with vt_dev_conn.cursor() as cur:
+                cur.executemany(insert_query, data_to_insert)
+
+        # ---- USE THE DYNAMIC BATCH SIZE FOR THE OFFSET ----
+        offset += dynamic_batch_size
+        # ---- END CHANGE ----
+
+    if mismatches_found_for_table:
+        summary.append(f"Table '{table}': Mismatches found and written to the database.")
+    else:
+        summary.append(f"Table '{table}': No mismatches found.")
+    print(f"--- Finished comparison for table: {table} ---\n")
+
+
