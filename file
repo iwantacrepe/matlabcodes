@@ -1,49 +1,16 @@
-lOf course. This script has the exact same character vs. byte length issue as the previous one. The solution is to apply the same logic: introduce a byte-aware trimming function and integrate it into your data formatting and comparison steps.
-Here are the necessary changes for your view comparison script.
-1. New Helper Function: trim_to_bytes
-First, add this new helper function to your script. A good place is near your other utility functions like is_empty and format_value.
-def trim_to_bytes(s, max_bytes, encoding='utf-8'):
-    """
-    Trims a string to a maximum number of bytes, safely handling multi-byte characters.
-    """
-    # Encode the string into bytes
-    encoded_s = s.encode(encoding)
-    
-    # If the byte length is already within the limit, return the original string
-    if len(encoded_s) <= max_bytes:
-        return s
-        
-    # Otherwise, slice the byte string and decode it back to a string,
-    # ignoring errors from any partially-cut multi-byte character.
-    return encoded_s[:max_bytes].decode(encoding, errors='ignore')
-
-
-2. Modified format_value Function
-Next, replace your current format_value function with this updated version. It now incorporates the byte-trimming logic, making it robust for database insertions.
-def format_value(val, max_db_bytes=255):
-    """
-    Formats a value for insertion into the results table, ensuring it is trimmed
-    to the specified byte length to prevent database errors.
-    """
-    if pd.isna(val):
-        return "NULL"
-    
-    # Convert value to string
-    val_str = str(val)
-    
-    # Trim the string to the max byte length required by the database
-    return trim_to_bytes(val_str, max_db_bytes)
-
-3. Modified compare_rows Function
-Finally, replace your compare_rows function. The updated version is cleaner because the new format_value function handles both null checks and byte trimming.
+Got it. You want to apply the byte-trimming logic only to the mismatched value columns (ValueInVertica, ValueInSnowflake) and leave the row_keys logic as it was, without any trimming.
+Here is the updated compare_rows function that does exactly that. The row_keys are constructed using simple string conversion to avoid any trimming, while the new format_value() function (with its 255-byte limit) is only used for the actual mismatched values.
+Modified compare_rows Function
+Replace your compare_rows function with this version.
 def compare_rows(df, compare_cols, keys, view_name):
     """Compares rows in a merged DataFrame and identifies mismatches."""
     mismatches = []
     for _, row in df.iterrows():
-        # Using a larger byte limit for the key column to avoid accidental trimming.
+        # Reverted to simple string conversion for keys to avoid any trimming.
+        # This gets the key from whichever side of the merge is not null.
         row_keys = ", ".join([
-            format_value(row.get(f"{k}_sf"), max_db_bytes=1000) if not pd.isna(row.get(f"{k}_sf"))
-            else format_value(row.get(f"{k}_vt"), max_db_bytes=1000) for k in keys
+            str(row.get(f"{k}_sf")) if pd.notna(row.get(f"{k}_sf"))
+            else str(row.get(f"{k}_vt")) for k in keys
         ])
 
         is_entirely_missing_in_vt = all(is_empty(row.get(f"{col}_vt")) for col in compare_cols) and any(not is_empty(row.get(f"{col}_sf")) for col in compare_cols)
@@ -83,11 +50,10 @@ def compare_rows(df, compare_cols, keys, view_name):
                 mismatches.append({
                     "ViewName": view_name,
                     "ColumnName": col,
-                    # The format_value function now handles trimming to 255 bytes correctly
+                    # Byte-trimming is applied ONLY here, on the value columns.
                     "ValueInVertica": format_value(val_vt),
                     "ValueInSnowflake": format_value(val_sf),
                     "Key": row_keys
                 })
     return mismatches
 
-By making these three changes, your script will now correctly handle strings with multi-byte characters and prevent the database insertion error. No additional module imports are required.
