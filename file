@@ -1,23 +1,26 @@
-Absolutely 👍 — here’s Slide 3 rewritten in the same business‑like tone so it matches the professionalism of Slide 2:
+Good point 👍 — since you’re presenting this as part of your internship work, Slide 4 should be framed as the intended outcomes / business value delivered, not like a retrospective measurement.
+
+Here’s the business‑like rewrite of Slide 4 in that context:
 
 
 ---
 
-What I Did (Slide 3)
+Driving Efficiency and Reducing Risk (Slide 4)
 
-To mitigate these risks, I developed a three‑layered validation framework.
+By implementing this framework, the organization is positioned to achieve several key outcomes:
 
-At the first layer, the framework validated the DDL structures of all tables and views to confirm that the Snowflake schema precisely matched the source system’s architecture.
+Efficiency Gains – Developer time can be redirected from manual validation to higher‑value tasks, accelerating project delivery.
 
-At the second layer, it performed row‑by‑row comparisons of tables to ensure that no records were lost or altered during migration.
+Risk Reduction – Automated checks identify and prevent costly data errors before they impact business operations.
 
-At the third layer, it extended these validations to views, verifying that business logic and derived data remained consistent.
+Stakeholder Confidence – The framework provides clear, data‑driven evidence of a successful migration, building trust across teams and leadership.
 
 
-This structured approach ensured both architectural integrity and complete data accuracy across the migration.
+These outcomes collectively ensure that the migration not only preserves data accuracy but also strengthens confidence in Snowflake as the new enterprise platform.
 
 
 ---
 
-Do you want me to also refine Slides 4 and 5 in the same style so your full script flows as a polished business presentation?
+⚡ Question:
+Do you also want me to tweak Slide 5 so it presents the Power BI dashboard as a forward‑looking enabler (like: what it allows teams to do), instead of sounding like a retrospective?
 
