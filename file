@@ -1,96 +1,20 @@
-Here’s a polished presentation script you can use with your slides. I’ll make it structured, professional, and impactful while keeping it natural for delivery:
+Perfect — thanks for clarifying 👍. You want Slide 2 to stay professional and business-like, not too conversational. I’ll rewrite it so it feels like you’re presenting a structured business case rather than reading bullets.
 
-
----
-
-Opening (Slide 1)
-
-Good [morning/afternoon], everyone.
-I’m Vaibhav Verma, and over the last two months of my internship, I worked on building An Automated Validation Framework for the Snowflake Migration.
-
-This project was designed to ensure data accuracy, integrity, and trust during a large-scale migration from Vertica to Snowflake, where manual validation simply wasn’t enough.
+Here’s the refined Slide 2 script in a business tone:
 
 
 ---
 
 Why There Was a Need for This (Slide 2)
 
-During the migration, we faced four major challenges:
+The migration presented several critical challenges. First, the sheer volume of data made manual checks impractical — scaling such efforts to millions of records would inevitably result in errors being overlooked. Second, there was the risk of silent data corruption, where subtle discrepancies could undermine the reliability of critical business data without immediate detection.
 
-1. The Impossible Scale of Manual Checks – With millions of records, manual validation was not only time-consuming but also prone to errors.
+These issues posed a direct threat to business operations, as inaccurate data would compromise reports, dashboards, and decision-making systems. Additionally, manual validation represented a significant drain on developer productivity, with the cost of correcting issues post‑migration being even higher.
 
-
-2. The Risk of Silent Data Corruption – Small, hard-to-detect discrepancies could go unnoticed and compromise critical business data.
-
-
-3. The Direct Threat to Business Operations – Any flawed data would directly affect business reports, dashboards, and decision-making tools.
-
-
-4. The High Cost of Inefficiency and Rework – Manual processes drained developer resources, and fixing mistakes after migration would have been even more expensive.
-
-
-
-So, it became clear that an automated solution was necessary.
+To address these risks effectively, an automated validation framework was essential.
 
 
 ---
 
-What I Did (Slide 3)
-
-To address this, I designed a three-layered validation framework:
-
-1. Schema Validation (DDL) – Verified that all tables and views in Snowflake matched the exact structure in Vertica.
-
-
-2. Row-by-Row Table Comparison – Ensured that no data was lost or altered during migration.
-
-
-3. Row-by-Row View Comparison – Validated views to guarantee consistency in business logic and data representation.
-
-
-
-This comprehensive approach meant that both the architecture and the data itself were thoroughly checked.
-
-
----
-
-Result of This Work (Slide 4)
-
-The outcomes were very impactful:
-
-Increased Efficiency – Developers were freed from spending weeks on manual checks.
-
-Reduced Risk – The framework caught errors early, preventing costly downstream issues.
-
-Proof of Migration Success – The automated reports provided stakeholders with data-driven confidence in the migration.
-
-
-
----
-
-Power BI Dashboard (Slide 5)
-
-Finally, I built a Power BI dashboard to make the validation results easily understandable.
-
-It gave stakeholders a real-time snapshot of the migration status.
-
-Teams could quickly pinpoint errors and fix them faster.
-
-And beyond this project, the framework and dashboard now serve as a reusable asset for future migrations.
-
-
-
----
-
-Closing
-
-In summary, over the past two months, I developed an automated framework that not only ensured a successful Snowflake migration but also created a replicable solution that the organization can use going forward.
-
-Thank you.
-
-
----
-
-⚡ Question:
-Do you want me to also make this script time-boxed for a 2-minute presentation (like you had for your Accenture hackathon), or should it stay detailed so you can extend as needed?
+Would you like me to align Slide 3–5 in the same business-like tone so your whole script feels consistent?
 
