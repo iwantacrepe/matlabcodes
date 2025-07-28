@@ -1,26 +1,25 @@
-Good point 👍 — since you’re presenting this as part of your internship work, Slide 4 should be framed as the intended outcomes / business value delivered, not like a retrospective measurement.
-
-Here’s the business‑like rewrite of Slide 4 in that context:
+Perfect 👍 — I’ll frame Slide 5 in the same forward‑looking, business‑focused tone, so it aligns with Slide 4.
 
 
 ---
 
-Driving Efficiency and Reducing Risk (Slide 4)
+Power BI Dashboard (Slide 5)
 
-By implementing this framework, the organization is positioned to achieve several key outcomes:
+To complement the framework, I designed a Power BI dashboard that delivers immediate visibility into the migration’s status.
 
-Efficiency Gains – Developer time can be redirected from manual validation to higher‑value tasks, accelerating project delivery.
+It provides stakeholders with a clear, real‑time snapshot of what is working and what requires attention.
 
-Risk Reduction – Automated checks identify and prevent costly data errors before they impact business operations.
+It enables teams to pinpoint the exact source of discrepancies quickly, significantly reducing the time to resolution.
 
-Stakeholder Confidence – The framework provides clear, data‑driven evidence of a successful migration, building trust across teams and leadership.
+Beyond this migration, the dashboard serves as a replicable asset, offering a proven template that can streamline future data migration projects.
 
 
-These outcomes collectively ensure that the migration not only preserves data accuracy but also strengthens confidence in Snowflake as the new enterprise platform.
+Together, the framework and dashboard create a comprehensive solution — ensuring accuracy, efficiency, and transparency throughout the migration process.
 
 
 ---
 
-⚡ Question:
-Do you also want me to tweak Slide 5 so it presents the Power BI dashboard as a forward‑looking enabler (like: what it allows teams to do), instead of sounding like a retrospective?
+✅ Now all slides (2–5) are business‑like and consistent.
+
+Do you want me to also give you a final stitched full script (Slides 1–5 in one flow) so you don’t have to piece them together?
 
