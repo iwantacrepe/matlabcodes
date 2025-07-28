@@ -1,20 +1,23 @@
-Perfect — thanks for clarifying 👍. You want Slide 2 to stay professional and business-like, not too conversational. I’ll rewrite it so it feels like you’re presenting a structured business case rather than reading bullets.
-
-Here’s the refined Slide 2 script in a business tone:
+Absolutely 👍 — here’s Slide 3 rewritten in the same business‑like tone so it matches the professionalism of Slide 2:
 
 
 ---
 
-Why There Was a Need for This (Slide 2)
+What I Did (Slide 3)
 
-The migration presented several critical challenges. First, the sheer volume of data made manual checks impractical — scaling such efforts to millions of records would inevitably result in errors being overlooked. Second, there was the risk of silent data corruption, where subtle discrepancies could undermine the reliability of critical business data without immediate detection.
+To mitigate these risks, I developed a three‑layered validation framework.
 
-These issues posed a direct threat to business operations, as inaccurate data would compromise reports, dashboards, and decision-making systems. Additionally, manual validation represented a significant drain on developer productivity, with the cost of correcting issues post‑migration being even higher.
+At the first layer, the framework validated the DDL structures of all tables and views to confirm that the Snowflake schema precisely matched the source system’s architecture.
 
-To address these risks effectively, an automated validation framework was essential.
+At the second layer, it performed row‑by‑row comparisons of tables to ensure that no records were lost or altered during migration.
+
+At the third layer, it extended these validations to views, verifying that business logic and derived data remained consistent.
+
+
+This structured approach ensured both architectural integrity and complete data accuracy across the migration.
 
 
 ---
 
-Would you like me to align Slide 3–5 in the same business-like tone so your whole script feels consistent?
+Do you want me to also refine Slides 4 and 5 in the same style so your full script flows as a polished business presentation?
 
