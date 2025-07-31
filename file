@@ -1,3 +1,11 @@
+Of course! Here is your Python code, thoroughly commented to explain the logic, structure, and the "what" and "why" behind each part. This will help the next developer understand and maintain the application.
+This application is a Data Migration Validation Configurator. Its main purpose is to:
+ * Connect to a Vertica database to get a list of all tables and their columns within a specific schema.
+ * Create an input_columns.xlsx file with this information.
+ * Provide a graphical user interface (GUI) built with tkinter for a user to review each table.
+ * Allow the user to flag columns in each table as either a 'key' (primary key/identifier) or 'exclude' (column to be ignored during validation), or to flag an entire table as 'stage' (to be skipped entirely).
+ * Save these user-defined configurations into an output_config.xlsx file, which can then be used by another process or script for data migration validation.
+Commented Code
 # =========================================================================================
 #                    DATA MIGRATION VALIDATION CONFIGURATOR
 # =========================================================================================
@@ -349,4 +357,209 @@ class MigrationConfiguratorApp:
 
     def display_current_table(self):
         """
-        Updates the UI to show the data for the current table. This functi
+        Updates the UI to show the data for the current table. This function is
+        called whenever the user navigates to a new table.
+        """
+        # --- Clean up previous state ---
+        # Destroy all old checkboxes from the previous table.
+        for widget in self.columns_frame.winfo_children():
+            widget.destroy()
+        self.column_vars.clear() # Clear the list of checkbox variables
+        self.is_table_staged = False # Reset the 'stage' flag for the new table
+
+        # --- Update UI elements ---
+        # Enable/disable Prev/Next buttons based on the current position in the list.
+        self.prev_button.config(state=tk.NORMAL if self.current_table_index > 0 else tk.DISABLED)
+        self.next_button.config(state=tk.NORMAL)
+        self.apply_button.config(state=tk.NORMAL)
+        
+        # Get the name and columns for the current table.
+        table_name = self.table_names[self.current_table_index]
+        columns = self.table_data[table_name]
+        
+        # Update the main title label with the current table's name.
+        self.table_name_label.config(text=table_name)
+        self.log_message(f"--- Now processing table: '{table_name}' ({self.current_table_index + 1}/{len(self.table_names)}) ---")
+        
+        # --- Dynamically create checkboxes for columns ---
+        # Loop through each column of the current table.
+        for i, col in enumerate(columns):
+            var = tk.IntVar() # Create a tkinter variable for the checkbox state (0=off, 1=on).
+            # Create the Checkbutton widget.
+            cb = ttk.Checkbutton(self.columns_frame, text=col, variable=var)
+            cb.grid(row=i, column=0, sticky='w', padx=10, pady=2)
+            # Store both the variable and the column name for later retrieval.
+            self.column_vars.append((var, col))
+            
+        # Reset the UI controls (radio buttons, etc.) for the new table.
+        self.reset_ui_for_new_selection()
+
+    def reset_ui_for_new_selection(self):
+        """
+        Resets the UI controls on the current table screen, usually after applying
+        a selection, so the user can make another selection on the same table.
+        """
+        self.flag_var.set("") # Deselect all radio buttons.
+        # Uncheck all column checkboxes.
+        for var, _ in self.column_vars:
+            var.set(0)
+        # Trigger the on_flag_change logic to ensure column checkboxes are enabled/disabled correctly.
+        self.on_flag_change()
+        # Ensure the Apply button and radio buttons are enabled.
+        self.apply_button.config(state=tk.NORMAL)
+        for child in self.flag_frame.winfo_children():
+            child.config(state=tk.NORMAL)
+
+    def on_flag_change(self):
+        """
+        This is a callback function that runs whenever a radio button is clicked.
+        It enables or disables the column checkboxes based on the selection.
+        """
+        selected_flag = self.flag_var.get()
+        # Checkboxes should only be active if the flag is 'key' or 'exclude'.
+        # If the flag is 'stage', they are irrelevant and should be disabled.
+        state = tk.NORMAL if selected_flag in ["key", "exclude"] else tk.DISABLED
+        
+        # Loop through all widgets in the columns frame and update their state.
+        for widget in self.columns_frame.winfo_children():
+            if isinstance(widget, ttk.Checkbutton):
+                widget.config(state=state)
+
+    def apply_selection(self):
+        """
+        Called when the "Apply Selections" button is clicked. It validates the
+        user's input and adds the configuration to the output_records buffer.
+        """
+        flag = self.flag_var.get()
+        # 1. Validation: Ensure a flag is selected.
+        if not flag:
+            messagebox.showwarning("Selection Missing", "You must select a flag (Key, Exclude, or Stage) before applying.")
+            return
+            
+        table_name = self.table_names[self.current_table_index]
+        # Get a list of all column names that have their checkbox ticked.
+        selected_columns = [col_name for var, col_name in self.column_vars if var.get() == 1]
+        
+        # 2. Validation: If flag is 'key' or 'exclude', ensure at least one column is selected.
+        if flag in ["key", "exclude"] and not selected_columns:
+            messagebox.showwarning("Selection Missing", f"You must select one or more columns to mark as '{flag}'.")
+            return
+            
+        # 3. Process the selection based on the chosen flag.
+        if flag == "stage":
+            # If 'stage', add a single record for the whole table.
+            self.output_records.append({'table_name': table_name, 'flag': 'stage', 'column_name': None})
+            self.log_message(f"Table '{table_name}' marked as 'stage'. It will be skipped.", "SUCCESS")
+            self.is_table_staged = True
+            # Disable further actions on this table since it's being skipped.
+            self.apply_button.config(state=tk.DISABLED)
+            for child in self.flag_frame.winfo_children():
+                child.config(state=tk.DISABLED)
+        else:
+            # If 'key' or 'exclude', create a record for each selected column.
+            for col in selected_columns:
+                self.output_records.append({'table_name': table_name, 'flag': flag, 'column_name': col})
+                self.log_message(f"Column '{col}' in table '{table_name}' marked as '{flag}'.")
+            # After applying, reset the UI so the user can flag other columns in the same table.
+            self.reset_ui_for_new_selection()
+
+    def save_records_to_excel(self, is_final=False):
+        """
+        Saves the records currently buffered in self.output_records to the Excel file.
+        This is called when moving between tables or when finishing the process.
+        """
+        # If there are no new records to save, just return.
+        if not self.output_records:
+            if is_final: # Only show a warning if it's the final save attempt.
+                messagebox.showwarning("Nothing to Save", "No new configurations were applied.")
+            return False if is_final else True # Signal whether the process should continue.
+            
+        try:
+            # Create a DataFrame from the list of new records.
+            new_df = pd.DataFrame(self.output_records)
+            
+            # Try to read the existing output file. If it exists, we'll append to it.
+            try:
+                existing_df = pd.read_excel(self.output_file)
+                # Concatenate the old and new DataFrames.
+                combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+            except (FileNotFoundError, ValueError):
+                # If the file doesn't exist or is empty/corrupt, the new DataFrame is the only one.
+                combined_df = new_df
+            
+            # Save the combined DataFrame back to the Excel file.
+            combined_df.to_excel(self.output_file, index=False)
+            
+            if self.output_records:
+                self.log_message(f"Saved {len(self.output_records)} new configurations to '{self.output_file}'.", "SUCCESS")
+            
+            # IMPORTANT: Clear the buffer after saving to prevent saving the same records again.
+            self.output_records.clear()
+            return True # Signal success
+            
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Failed to save output file: {e}")
+            return False # Signal failure
+
+    def previous_table(self):
+        """
+        Handles the "Previous Table" button click.
+        """
+        # First, save any pending changes for the current table.
+        self.save_records_to_excel()
+        # Navigate to the previous index if we are not at the beginning.
+        if self.current_table_index > 0:
+            self.current_table_index -= 1
+            self.display_current_table() # Redraw the UI for the new table.
+            self.log_message(f"Moved back to previous table.")
+
+    def next_table(self):
+        """
+        Handles the "Next Table" button click.
+        """
+        # First, save any pending changes for the current table.
+        self.save_records_to_excel()
+        # Navigate to the next index if we are not at the end.
+        if self.current_table_index < len(self.table_names) - 1:
+            self.current_table_index += 1
+            self.display_current_table() # Redraw the UI for the new table.
+        else:
+            # If the user is on the last table, inform them and disable the 'Next' button.
+            self.log_message("Reached the last table. Click 'Finish & Save' to complete.", "INFO")
+            self.next_button.config(state=tk.DISABLED)
+            messagebox.showinfo(
+                "Process Complete",
+                "You have reached the last table.\n\n"
+                "You can still use the 'Previous Table' button to review or change earlier selections.\n\n"
+                "When you are finished, click 'Finish & Save' to generate the output file and exit."
+            )
+
+    def finalize_process(self):
+        """
+        Handles the "Finish & Save" button click. This is the final step.
+        """
+        # Perform one last save to catch any unapplied changes on the last table.
+        if self.save_records_to_excel(is_final=True):
+            final_msg = f"Configuration complete! All data saved to '{self.output_file}'."
+            self.log_message(final_msg, "SUCCESS")
+            self.table_name_label.config(text="All Done! ✅")
+            
+            # Disable the main action buttons to prevent further edits.
+            for btn in [self.apply_button, self.next_button, self.prev_button]:
+                btn.config(state=tk.DISABLED)
+                
+            # Ask the user if they want to close the application.
+            if messagebox.askokcancel("Success", f"{final_msg}\n\nDo you want to close the application?"):
+                self.root.quit()
+
+# --- Application Entry Point ---
+# The standard Python entry point. This code runs only when the script is executed directly.
+if __name__ == "__main__":
+    # 1. Create the root (main) window for the application.
+    root = tk.Tk()
+    # 2. Create an instance of our application class, passing the root window to it.
+    app = MigrationConfiguratorApp(root)
+    # 3. Start the tkinter event loop. This makes the window appear and become interactive.
+    #    The script will stay in this loop until the window is closed.
+    root.mainloop()
+
