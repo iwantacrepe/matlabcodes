@@ -1,44 +1,48 @@
-Of course. Here is your Python script with detailed comments explaining the logic and the purpose behind each section. This will help the next developer understand, maintain, and extend the code.
+Of course. Here is your Python script, now focused on comparing views, with detailed comments to explain the logic and purpose. This documentation will ensure the next developer can easily understand and maintain the code.
 Code Overview
-This script performs a data validation and comparison between Vertica (source) and Snowflake (target) databases. Its primary goal is to identify discrepancies in data for a given set of tables.
+This script performs a data validation and comparison between Vertica views and Snowflake views. It's a critical tool for ensuring data consistency between two different database systems, especially after data migration or replication.
 How it works:
- * Configuration: It reads an Excel file (table.xlsx) that specifies which tables to compare. For each table, the file defines key columns (for joining), columns to exclude from comparison, and an optional filter column (e.g., a timestamp for incremental checks).
- * Connection: It connects to both Vertica and Snowflake using credentials stored as environment variables. It uses a separate connection for writing results to avoid transaction conflicts.
- * Batch Processing: For each table, it fetches data from both databases in manageable chunks (batches). The batch size is dynamically adjusted based on the number of columns to prevent memory overload.
- * Comparison: It compares the data row-by-row and column-by-column. It checks for:
-   * Rows that exist in one database but not the other.
-   * Mismatched values in common columns.
- * Logging: All discrepancies are written into a specific Vertica table (ER1.vertica_snowflake_table_data_comparison) for later analysis.
- * Summary: After processing all tables, it prints a summary to the console.
+ * Configuration: It reads an Excel file (view.xlsx) that defines which views to compare. For each view, the file must specify:
+   * Key columns: Used to join the data from both sources.
+   * Exclude columns: Columns to ignore during the comparison (e.g., ETL timestamps).
+   * Filter column (optional): A column (like a date) to limit the scope of the comparison.
+ * Connection: It connects to both Vertica and Snowflake. Credentials are not hardcoded but are expected to be set as environment variables for security. It uses two connections to Vertica: one for reading data and another for writing results, which prevents transaction conflicts.
+ * Batch Processing: To handle large views without running out of memory, the script fetches and compares data in manageable chunks (batches). The size of these batches is dynamically adjusted based on the number of columns being fetched.
+ * Comparison Logic: The core of the script compares the data from both views, looking for two main types of discrepancies:
+   * Row Mismatches: Rows that exist in the Vertica view but not in the Snowflake view, or vice-versa.
+   * Value Mismatches: Rows that exist in both but have different values in one or more of the compared columns.
+ * Logging Results: All identified discrepancies are inserted into a dedicated Vertica table (ER1.vertica_snowflake_view_data_comparison) for detailed analysis and reporting.
+ * Summary Report: After processing all configured views, the script prints a final summary to the console, indicating which views had mismatches and which were clean.
 Commented Code
 # =========================================================================================
-#                    VERTICA TO SNOWFLAKE DATA VALIDATION SCRIPT
+#                   VERTICA TO SNOWFLAKE VIEW DATA VALIDATION SCRIPT
 # =========================================================================================
 #
 # OVERVIEW:
-# This script is designed to compare data between tables in a Vertica database (source)
-# and a Snowflake database (target). It reads a configuration from an Excel file to
-# determine which tables and columns to compare. Any identified discrepancies are
-# logged into a results table in Vertica for review.
+# This script is designed to compare the data output of views in a Vertica database
+# (source) and a Snowflake database (target). It uses a configuration from an Excel
+# file to determine which views and columns to validate. Any discrepancies found
+# are logged into a results table in Vertica for review.
 #
 # LIBRARIES USED:
-# - pandas: For data manipulation, reading the config file, and handling data in DataFrames.
+# - pandas: Crucial for data manipulation, reading the configuration file, and handling
+#   the data from both databases in DataFrames.
 # - snowflake.connector: The official Python driver for connecting to Snowflake.
 # - vertica_python: The Python driver for connecting to Vertica.
-# - os: Used to construct file paths for credentials.
-# - datetime: Used for handling date/time values, particularly for filtering.
+# - os: Used to construct file paths, particularly for the private key file.
+# - datetime: Used for handling date/time values, especially for filtering data.
 #
 # EXECUTION FLOW:
 # 1. Load constants and configuration from environment variables and a local Excel file.
-# 2. Establish connections to Snowflake and Vertica.
-# 3. Clean up old results from the logging table in Vertica.
-# 4. Loop through each table specified in the Excel configuration.
-# 5. For each table:
-#    a. Fetch data in batches from both databases.
-#    b. Compare the batches row by row.
-#    c. Insert any found mismatches into the Vertica results table.
-# 6. Close all database connections.
-# 7. Print a final summary of the comparison results.
+# 2. Establish connections to Snowflake and Vertica (using a separate connection for writes).
+# 3. Clean up old results from the logging table in Vertica to manage its size.
+# 4. Loop through each view specified in the Excel configuration file.
+# 5. For each view:
+#    a. Fetch data in managed batches from both databases.
+#    b. Compare the batches row by row and value by value.
+#    c. Insert any found mismatches into the dedicated Vertica results table.
+# 6. Close all database connections, even if errors occur.
+# 7. Print a final summary of the comparison results to the console.
 #
 # =========================================================================================
 
@@ -49,65 +53,59 @@ import vertica_python
 from datetime import datetime
 
 # --- CONFIGURATION & CONSTANTS ---
-# These variables are expected to be set as environment variables in the execution
-# environment (e.g., in a Docker container, Jenkins job, or shell profile).
-# This approach avoids hardcoding sensitive credentials directly in the script.
+# These variables must be set as environment variables in the execution environment.
+# This is a security best practice to avoid hardcoding credentials in the code.
 
 # Vertica Production Credentials
-VERTICA_HOST = VERTICA_HOST
-VERTICA_USER = VERTICA_USER
-VERTICA_PASSWORD = VERTICA_PASSWORD
-VERTICA_DB = VERTICA_DB
+VERTICA_HOST=VERTICA_HOST
+VERTICA_USER=VERTICA_USER
+VERTICA_PASSWORD=VERTICA_PASSWORD
+VERTICA_DB=VERTICA_DB
 
 # Snowflake Credentials
-URL_SF = URL_SF
-KEYTAB_FILE_SDL_SF = KEYTAB_FILE_SDL_SF # Private key file for JWT authentication
-PASSWORD_SDL_SF = PASSWORD_SDL_SF       # Passphrase for the private key
-DB_SDL_SF = DB_SDL_SF
-DB_SDL_SF_VW = DB_SDL_SF_VW
-SCHEMA_SDL_SF = SCHEMA_SDL_SF
-USER_SDL_SF = USER_SDL_SF
-WAREHOUSE_SDL_SF = WAREHOUSE_SDL_SF
-ROLE_SDL_SF = ROLE_SDL_SF
-KEYTAB_DIR = KEYTAB_DIR                 # Directory where the private key is stored
-DATA_DIR_VAR = DATA_DIR_VAR,
-SNOWFLAKE_JWT = "SNOWFLAKE_JWT"         # Specifies the JWT authentication method
+URL_SF=URL_SF
+KEYTAB_FILE_SDL_SF=KEYTAB_FILE_SDL_SF # Name of the private key file for JWT authentication
+PASSWORD_SDL_SF=PASSWORD_SDL_SF       # Passphrase for the encrypted private key
+DB_SDL_SF=DB_SDL_SF
+DB_SDL_SF_VW=DB_SDL_SF_VW             # The specific Snowflake database to connect to for views
+SCHEMA_SDL_SF=SCHEMA_SDL_SF
+USER_SDL_SF=USER_SDL_SF
+WAREHOUSE_SDL_SF=WAREHOUSE_SDL_SF
+ROLE_SDL_SF=ROLE_SDL_SF
+KEYTAB_DIR=KEYTAB_DIR                 # Directory path where the private key is stored
+DATA_DIR_VAR=DATA_DIR_VAR,
+SNOWFLAKE_JWT="SNOWFLAKE_JWT"         # Specifies the JWT authentication method for Snowflake
 
 # --- FILE & PATH CONFIGURATION ---
-FILE_NAME = "table.xlsx"
-XLS_PATH_TABLE = DATA_DIR_VAR[0] + FILE_NAME # Full path to the input configuration Excel file
+FILE_NAME="view.xlsx"
+XLS_PATH_VIEW=DATA_DIR_VAR[0]+FILE_NAME # Constructs the full path to the input configuration Excel file
 
 # --- PANDAS DISPLAY SETTINGS ---
-# These options configure pandas to display all rows and columns of a DataFrame
-# when printed to the console, which is useful for debugging.
+# These options force pandas to display the full content of DataFrames when printed,
+# which is extremely helpful for debugging purposes.
 pd.set_option("display.max_rows", None)
 pd.set_option("display.max_columns", None)
 pd.set_option("display.width", None)
 pd.set_option("display.max_colwidth", None)
 
 # --- SCRIPT-LEVEL PARAMETERS ---
-SCHEMA = "ER1"  # The database schema to work within for both Vertica and Snowflake.
-START_DATETIME = "2020-10-01 00:00:00" # A default start date for incremental filtering.
+SCHEMA ="ER1" # The database schema where the views reside in both Vertica and Snowflake.
+START_DATETIME = "2020-10-01 00:00:00" # A default start date used for incremental filtering.
 
-# Parameters for dynamic batch size calculation.
-BASELINE_BATCH_SIZE = 100000  # The batch size for a table with a standard number of columns.
-BASELINE_COLS = 50            # The standard number of columns used as a baseline.
-MIN_BATCH_SIZE = 10000        # The absolute minimum batch size to use, regardless of column count.
-
-# A default list of columns to always exclude from comparison (e.g., ETL metadata).
-DEFAULT_EXCLUDE_COLS = [
-    "INSRT_TS", "UPDT_TS", "ETL_TRNS", "ETL_JOB", "INSRT_TR", "INSRT_JB",
-    "CREATION_DATE_TIME", "UPDT_TR", "UPDT_JB", "LAST_UPDATED_DATE"
-]
+# Parameters for the dynamic batch size calculation.
+BASELINE_BATCH_SIZE = 100000  # The number of rows to fetch for a view with a standard number of columns.
+BASELINE_COLS = 50            # The standard number of columns used as the baseline for calculation.
+MIN_BATCH_SIZE = 5000         # The absolute minimum batch size, to prevent excessively small fetches.
 
 def calculate_dynamic_batch_size(num_columns):
     """
-    Calculates batch size dynamically based on the number of columns to fetch.
-    The goal is to manage memory usage by fetching fewer rows when there are many columns.
-    This keeps the total data points per batch (rows * columns) relatively consistent.
+    Calculates the batch size (number of rows to fetch) dynamically based on the
+    number of columns. The goal is to manage memory usage by fetching fewer rows
+    when views have many columns, keeping the total data points per batch
+    (rows * columns) relatively constant.
     """
     if num_columns <= 0:
-        return BASELINE_BATCH_SIZE  # Return default if column count is invalid.
+        return BASELINE_BATCH_SIZE  # Fallback to the default if column count is invalid.
 
     # Calculate the target "data load" based on our baseline constants.
     target_data_load = BASELINE_BATCH_SIZE * BASELINE_COLS
@@ -121,8 +119,9 @@ def calculate_dynamic_batch_size(num_columns):
 def is_datetime_type(dtype):
     """
     Checks if a column's data type string represents a date, time, or timestamp.
-    This is used to apply special formatting (casting to DATE) to these columns
-    to avoid comparison issues related to timezones or fractional seconds.
+    This is used to apply special formatting (casting to a standard DATE format)
+    to these columns. This helps avoid comparison issues caused by differences in
+    timezones or fractional second precision between Vertica and Snowflake.
     """
     if not isinstance(dtype, str):
         return False
@@ -135,11 +134,11 @@ def connect_to_snowflake():
     """
     print("Connecting to Snowflake...")
     return snowflake.connector.connect(
-        account=URL_SF.split("//")[-1].split(".snowflakecomputing.com")[0], # Extracts the account name from the URL
+        account = URL_SF.split("//")[-1].split(".snowflakecomputing.com")[0], # Extracts the account identifier from the full URL
         user=USER_SDL_SF,
-        private_key_file=os.path.join(KEYTAB_DIR, KEYTAB_FILE_SDL_SF), # Full path to the private key
-        private_key_file_pwd=PASSWORD_SDL_SF, # Passphrase for the key
-        database=DB_SDL_SF,
+        private_key_file=os.path.join(KEYTAB_DIR, KEYTAB_FILE_SDL_SF), # Constructs the full path to the private key
+        private_key_file_pwd=PASSWORD_SDL_SF, # The passphrase for the key, if it's encrypted
+        database=DB_SDL_SF_VW, # Connecting to the specific database for views
         schema=SCHEMA_SDL_SF,
         warehouse=WAREHOUSE_SDL_SF,
         role=ROLE_SDL_SF,
@@ -157,72 +156,68 @@ def connect_to_vertica():
         user=VERTICA_USER,
         password=VERTICA_PASSWORD,
         database=VERTICA_DB,
-        autocommit=True  # Ensures each statement is committed automatically.
+        autocommit=True  # Ensures each SQL statement is committed automatically without needing a separate commit call.
     )
 
-def get_snowflake_columns_and_types(conn, table):
+def get_columns_and_types(conn, object_name, dbtype="snowflake"):
     """
-    Fetches column names and their data types for a given table from Snowflake's
-    metadata catalog (INFORMATION_SCHEMA).
+    Fetches column names and their data types for a given view from the database's
+    metadata catalog. This is different for Snowflake and Vertica.
     Returns a dictionary like {'COLUMN_NAME': 'DATA_TYPE'}.
     """
-    with conn.cursor() as cur:
-        # This query retrieves metadata directly from Snowflake.
-        cur.execute("""
-            SELECT column_name, data_type
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE table_schema = %s AND UPPER(table_name) = %s
-            ORDER BY ordinal_position
-        """, (SCHEMA, table.upper()))
-        return {r[0]: r[1] for r in cur.fetchall()} # Convert result to a dictionary
+    if dbtype == "snowflake":
+        # Snowflake's metadata is available in the standard INFORMATION_SCHEMA.
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT column_name, data_type
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE table_schema = %s AND UPPER(table_name) = %s
+                ORDER BY ordinal_position
+            """, (SCHEMA, object_name.upper()))
+            return {r[0]: r[1] for r in cur.fetchall()} # Convert the list of tuples to a dictionary
+    else: # vertica
+        # Vertica stores view column metadata in a specific system table `v_catalog.view_columns`.
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT column_name, data_type
+                FROM v_catalog.view_columns
+                WHERE table_schema = %s AND LOWER(table_name) = %s
+                ORDER BY ordinal_position
+            """, (SCHEMA, object_name.lower()))
+            return {r[0]: r[1] for r in cur.fetchall()}
 
-def get_vertica_columns_and_types(conn, table):
+def get_row_count(conn, view_name, schema, filter_col=None, start_datetime=None):
     """
-    Fetches column names and their data types for a given table from Vertica's
-    metadata catalog (v_catalog).
-    Returns a dictionary like {'COLUMN_NAME': 'DATA_TYPE'}.
+    Gets the total row count for a view. If a filter column and start date are
+    provided, it gets the count for that filtered subset. This is a quick pre-check
+    to see if views are empty before attempting a full, expensive data fetch.
     """
-    with conn.cursor() as cur:
-        # This query retrieves metadata directly from Vertica.
-        cur.execute("""
-            SELECT column_name, data_type
-            FROM v_catalog.columns
-            WHERE table_schema = %s AND LOWER(table_name) = %s
-            ORDER BY ordinal_position
-        """, (SCHEMA, table.lower()))
-        return {r[0]: r[1] for r in cur.fetchall()} # Convert result to a dictionary
-
-def get_row_count(conn, table, schema, filter_col=None, start_datetime=None):
-    """
-    Gets the total row count for a table. If a filter column and start date are
-    provided, it gets the count for the filtered subset. This is a quick check
-    to see if tables are empty before attempting a full comparison.
-    """
-    query = f'SELECT COUNT(*) FROM "{schema}"."{table}"'
+    query = f'SELECT COUNT(*) FROM "{schema}"."{view_name}"'
     params = ()
-    # If a filter is specified, add a WHERE clause to the query.
+    # If a filter is specified, dynamically add a WHERE clause to the query.
     if filter_col and start_datetime:
         query += f' WHERE "{filter_col}" >= %s'
         params = (start_datetime,)
 
     with conn.cursor() as cur:
         cur.execute(query, params)
-        return cur.fetchone()[0] # Returns the first value of the first row (the count).
+        return cur.fetchone()[0] # The result is a single row with a single value (the count).
 
 def resolve_columns(requested, actual, force_upper=False):
     """
-    Resolves a list of requested column names against a list of actual available
-    column names from the database, performing a case-insensitive match.
-    This is crucial because column casing can differ between databases or in the config file.
+    Resolves a list of requested column names (from the config file) against a list
+    of actual available column names from the database, performing a case-insensitive match.
+    This is crucial because column casing can differ between databases or may be
+    inconsistent in the user-provided config file.
     """
     resolved = []
-    # Create a mapping of lowercase actual column names to their original casing.
+    # Create a mapping of lowercase actual column names back to their original casing.
     actual_map = {col.casefold(): col for col in actual}
     for col in requested:
         # Check if the lowercase version of the requested column exists in our map.
         if col.casefold() not in actual_map:
-            raise ValueError(f"Configuration Error: Column '{col}' not found in the table.")
-        # Get the actual column name with its original casing.
+            raise ValueError(f"Configuration Error: Column '{col}' not found in the view's available columns.")
+        # If it exists, get the actual column name with its original casing.
         resolved_name = actual_map[col.casefold()]
         if force_upper:
             resolved_name = resolved_name.upper()
@@ -231,23 +226,25 @@ def resolve_columns(requested, actual, force_upper=False):
 
 def trim_to_bytes(s, max_bytes, encoding='utf-8'):
     """
-    Trims a string to a maximum number of bytes, safely handling multi-byte
-    characters (like emojis or special symbols) to prevent cutting a character in half.
+    Trims a string to a maximum number of bytes. This is important for database
+    insertions, as it prevents "value too long for type" errors. It safely handles
+    multi-byte characters (like emojis or accented letters) to avoid cutting a
+    character in half, which would cause a decoding error.
     """
     encoded_s = s.encode(encoding)
     if len(encoded_s) <= max_bytes:
         return s
-    # Trim the byte representation and decode it, ignoring errors from incomplete characters.
+    # Trim the byte representation and then decode it back to a string,
+    # ignoring any errors from potentially incomplete characters at the end.
     return encoded_s[:max_bytes].decode(encoding, errors='ignore')
 
 def format_value(val, max_db_bytes=255):
     """
-    Formats a value before inserting it into the results table. It converts the value
-    to a string and trims it to a max byte length to prevent database errors (e.g.,
-    'value too long for type character varying(255)').
+    Formats a value before it's inserted into the results table. It converts the value
+    to a string and then trims it to a maximum byte length to prevent database errors.
     """
     if pd.isna(val):
-        return "NULL" # Represent pandas Not a Number/Null as a string "NULL".
+        return "NULL" # Represent pandas' Not a Number/Null as the string "NULL" for logging.
     val_str = str(val)
     return trim_to_bytes(val_str, max_db_bytes)
 
@@ -255,15 +252,16 @@ def is_empty(val):
     """A helper function to check if a value is null, NaN, or just an empty/whitespace string."""
     return pd.isna(val) or str(val).strip() == ""
 
-def compare_rows(df, compare_cols, keys, table):
+def compare_rows(df, compare_cols, keys, view_name):
     """
-    Compares rows in a merged DataFrame (containing data from both Snowflake and Vertica)
-    and identifies any discrepancies.
+    Compares rows within a single merged DataFrame (which contains data from both
+    Snowflake and Vertica) and identifies any discrepancies.
     """
     mismatches = []
     # Iterate through each row of the merged DataFrame.
     for _, row in df.iterrows():
-        # Construct a key string for logging purposes (e.g., "ID=123, CODE=ABC").
+        # Construct a key string for logging purposes (e.g., "ID=123, CODE=XYZ").
+        # This helps identify the exact row that has a mismatch.
         row_keys = ", ".join([
             str(row.get(f"{k}_sf")) if not pd.isna(row.get(f"{k}_sf"))
             else str(row.get(f"{k}_vt")) for k in keys
@@ -274,141 +272,106 @@ def compare_rows(df, compare_cols, keys, table):
         is_entirely_missing_in_vt = all(is_empty(row.get(f"{col}_vt")) for col in compare_cols) and any(not is_empty(row.get(f"{col}_sf")) for col in compare_cols)
         is_entirely_missing_in_sf = all(is_empty(row.get(f"{col}_sf")) for col in compare_cols) and any(not is_empty(row.get(f"{col}_vt")) for col in compare_cols)
         
-        # Log if the row is missing in Vertica.
+        # Log if the row is present in Snowflake but missing in Vertica.
         if is_entirely_missing_in_vt:
             mismatches.append({
-                "TableName": table, "ColumnName": "Row is Missing",
+                "ViewName": view_name, "ColumnName": "Row is Missing",
                 "ValueInVertica": "Missing in Vertica", "ValueInSnowflake": "Present",
                 "Key": row_keys
             })
-            continue # Move to the next row
+            continue # Skip to the next row since there are no column values to compare.
 
-        # Log if the row is missing in Snowflake.
+        # Log if the row is present in Vertica but missing in Snowflake.
         if is_entirely_missing_in_sf:
             mismatches.append({
-                "TableName": table, "ColumnName": "Row is Missing",
+                "ViewName": view_name, "ColumnName": "Row is Missing",
                 "ValueInVertica": "Present", "ValueInSnowflake": "Missing in Snowflake",
                 "Key": row_keys
             })
-            continue # Move to the next row
+            continue # Skip to the next row.
 
-        # --- Check for mismatched values in individual columns ---
+        # --- If the row exists in both, check for mismatched values in individual columns ---
         for col in compare_cols:
-            val_sf = row.get(f"{col}_sf")
-            val_vt = row.get(f"{col}_vt")
+            val_sf = row.get(f"{col}_sf") # Value from Snowflake
+            val_vt = row.get(f"{col}_vt") # Value from Vertica
 
-            # If both values are null, they match, so we can skip.
+            # If both values are null/NaN, they are considered a match, so we continue.
             if pd.isna(val_sf) and pd.isna(val_vt):
                 continue
 
             # A mismatch occurs if:
             # 1. One value is null but the other is not.
-            # 2. Neither are null, but their string representations (trimmed and lowercased) are different.
+            # 2. Neither are null, but their string representations (after trimming and making lowercase) are different.
             if pd.isna(val_sf) != pd.isna(val_vt) or (
                 not pd.isna(val_sf) and not pd.isna(val_vt) and
                 str(val_sf).strip().casefold() != str(val_vt).strip().casefold()
             ):
                 mismatches.append({
-                    "TableName": table, "ColumnName": col,
+                    "ViewName": view_name, "ColumnName": col,
                     "ValueInVertica": format_value(val_vt),
                     "ValueInSnowflake": format_value(val_sf),
                     "Key": row_keys
                 })
-
     return mismatches
 
-def compare_table(table, config_df, sf_conn, vt_conn, vt_conn_2, summary):
+def compare_view(view_name, config_df, sf_conn, vt_conn, vt_conn_2, summary):
     """
-    This is the main orchestration function for comparing a single table.
-    It handles configuration, pre-checks, batching, and invoking the comparison logic.
+    This is the main orchestration function for comparing a single view.
+    It handles reading the configuration, performing pre-checks, managing batch
+    processing, and invoking the core comparison logic.
     """
-    print(f"--- Starting comparison for table: {table} ---")
+    print(f"--- Starting comparison for view: {view_name} ---")
     
-    # --- 1. Read Configuration for this Specific Table ---
-    # Filter the main config DataFrame to get settings for the current table.
-    sub = config_df[config_df["Table Name"].str.casefold() == table.casefold()]
+    # --- 1. Read Configuration for this Specific View ---
+    # Filter the main config DataFrame to get the settings relevant to the current view.
+    sub = config_df[config_df["Table Name"].str.casefold() == view_name.casefold()]
     
-    # Check for the 'stage' flag, which means we should skip this table entirely.
+    # Check for the 'stage' flag. If present, the user wants to skip this view entirely.
     if (sub["Flag"].str.casefold() == "stage").any():
-        summary.append(f"Table '{table}': Skipped (Flagged as 'stage')")
-        print(f"Skipping table '{table}' as it is flagged as 'stage'.")
+        summary.append(f"View '{view_name}': Skipped (Flagged as 'stage')")
+        print(f"Skipping view '{view_name}' as it is flagged as 'stage'.")
         return
 
-    # Extract lists of key, exclude, and filter columns from the config.
+    # Extract lists of key columns and columns to exclude from the configuration.
     key_cols = sub[sub["Flag"].str.casefold() == "key"]["Column Name"].tolist()
-    exclude_cols = sub[sub["Flag"].str.casefold() == "exclude"]["Column Name"].tolist()
+    exclude_cols_from_config = sub[sub["Flag"].str.casefold() == "exclude"]["Column Name"].tolist()
+    # Define a default set of columns to always exclude (e.g., ETL metadata columns).
+    default_exclude_cols = ["INSRT_TS", "UPDT_TS","ETL_TRNS","ETL_JOB","INSRT_TR","INSRT_JB","CREATION_DATE_TIME","UPDT_TR","UPDT_JB","LAST_UPDATED_DATE"]
+    # Combine the user-defined excludes with the default excludes.
+    final_excludes = list(set(exclude_cols_from_config) | set(default_exclude_cols))
+
+    # Get the filter column, if one is defined.
     filter_cols = sub[sub["Flag"].str.casefold() == "filter"]["Column Name"].tolist()
     filter_col = filter_cols[0] if filter_cols else None
-    
+
     if filter_col:
         print(f"[INFO] Applying filter on column '{filter_col}' >= '{START_DATETIME}'.")
 
-    # A table must have key columns defined to be comparable.
+    # A view MUST have key columns defined in the config to be comparable.
     if not key_cols:
-        summary.append(f"Table '{table}': Skipped (No key columns defined in config)")
-        print(f"[ERROR] Skipping table '{table}' because no key columns were defined in the config.")
+        summary.append(f"View '{view_name}': Skipped (No key columns defined in config)")
+        print(f"[ERROR] Skipping view '{view_name}' because no key columns were defined in the config file.")
         return
-    
+
     # --- 2. Perform Pre-Checks (Row Counts) ---
-    print(f"[INFO] Performing initial row count check for table '{table}'...")
-    sf_count = get_row_count(sf_conn, table, SCHEMA, filter_col, START_DATETIME)
-    vt_count = get_row_count(vt_conn, table, SCHEMA, filter_col, START_DATETIME)
+    print(f"[INFO] Performing initial row count check for view '{view_name}'...")
+    sf_count = get_row_count(sf_conn, view_name, SCHEMA, filter_col, START_DATETIME)
+    vt_count = get_row_count(vt_conn, view_name, SCHEMA, filter_col, START_DATETIME)
     print(f"[INFO] Row Counts -> Snowflake: {sf_count}, Vertica: {vt_count}")
 
-    # Handle cases where one or both tables are empty.
+    # Handle cases where one or both views are empty, which is a mismatch in itself.
     data_to_insert = None
     if sf_count == 0 and vt_count > 0:
-        summary.append(f"Table '{table}': Logged as empty in Snowflake (Vertica has {vt_count} rows)")
-        print(f"[!!] Table '{table}' is empty in Snowflake but not in Vertica. Logging and skipping detailed comparison.")
-        data_to_insert = [(table, 'EmptyTable', f'{vt_count} rows', 'Empty', 'Table is empty in Snowflake')]
+        summary.append(f"View '{view_name}': Logged as empty in Snowflake (Vertica has {vt_count} rows)")
+        print(f"[!!] View '{view_name}' is empty in Snowflake but not in Vertica. Logging and skipping detailed comparison.")
+        data_to_insert = [(view_name, 'EmptyView', f'{vt_count} rows', 'Empty', 'View is empty in Snowflake')]
     elif vt_count == 0 and sf_count > 0:
-        summary.append(f"Table '{table}': Logged as empty in Vertica (Snowflake has {sf_count} rows)")
-        print(f"[!!] Table '{table}' is empty in Vertica but not in Snowflake. Logging and skipping detailed comparison.")
-        data_to_insert = [(table, 'EmptyTable', 'Empty', f'{sf_count} rows', 'Table is empty in Vertica')]
+        summary.append(f"View '{view_name}': Logged as empty in Vertica (Snowflake has {sf_count} rows)")
+        print(f"[!!] View '{view_name}' is empty in Vertica but not in Snowflake. Logging and skipping detailed comparison.")
+        data_to_insert = [(view_name, 'EmptyView', 'Empty', f'{sf_count} rows', 'View is empty in Vertica')]
     elif sf_count == 0 and vt_count == 0:
-        summary.append(f"Table '{table}': Skipped (Empty in both sources)")
-        print(f"Skipping table '{table}' as it's empty in both sources.")
-        return
-
-    # If we found an empty-table discrepancy, insert it and stop processing this table.
-    if data_to_insert:
-        insert_query = """
-            INSERT INTO ER1.vertica_snowflake_table_data_comparison
-            (table_name, column_name, value_in_vertica, value_in_snowflake, unique_key)
-            VALUES (%s, %s, %s, %s, %s)
-        """
-        with vt_conn_2.cursor() as cur:
-            cur.executemany(insert_query, data_to_insert)
+        summary.append(f"View '{view_name}': Skipped (Empty in both sources)")
+        print(f"Skipping view '{view_name}' as it's empty in both Snowflake and Vertica.")
         return
         
-    # --- 3. Resolve Column Names and Define Comparison Scope ---
-    # Get column metadata from both databases.
-    sf_cols_map = get_snowflake_columns_and_types(sf_conn, table)
-    vt_cols_map = get_vertica_columns_and_types(vt_conn, table)
-    
-    sf_cols = list(sf_cols_map.keys())
-    vt_cols = list(vt_cols_map.keys())
-
-    # Find the set of common columns (case-insensitive).
-    sf_norm_map = {col.casefold(): col for col in sf_cols}
-    vt_norm_map = {col.casefold(): col for col in vt_cols}
-    common_norm = set(sf_norm_map.keys()) & set(vt_norm_map.keys())
-    common_cols = [sf_norm_map[n] for n in common_norm] # Get original casing
-    all_cols = list(set(sf_cols + vt_cols)) # All unique columns from both sources
-
-    # Resolve the final lists of keys and columns to exclude.
-    keys = resolve_columns(key_cols, all_cols, force_upper=True)
-    excludes_from_excel = resolve_columns(exclude_cols, all_cols, force_upper=True) if exclude_cols else []
-    final_excludes = list(set(excludes_from_excel) | set(DEFAULT_EXCLUDE_COLS)) # Combine default and Excel excludes
-    
-    # The final list of columns to compare is what's common, minus keys and excludes.
-    compare_cols = [col for col in common_cols if col.upper() not in keys + final_excludes]
-    
-    # --- 4. Set up Batch Processing ---
-    total_cols_to_fetch = len(keys) + len(compare_cols)
-    dynamic_batch_size = calculate_dynamic_batch_size(total_cols_to_fetch)
-    print(f"[INFO] Using dynamic batch size: {dynamic_batch_size} for {total_cols_to_fetch} total columns.")
-
-    def fetch_df_batch(conn, dbtype, limit, offset):
-        """
-    
+    # If we found an empty-view discrepanc
