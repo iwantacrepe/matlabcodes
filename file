@@ -1,0 +1,352 @@
+# =========================================================================================
+#                    DATA MIGRATION VALIDATION CONFIGURATOR
+# =========================================================================================
+#
+# OVERVIEW:
+# This script creates a desktop application that helps users configure validation rules
+# for a data migration process. It fetches table and column metadata from a Vertica
+# database, presents it to the user in a GUI, and saves the user's configuration
+# choices to an Excel file.
+#
+# LIBRARIES USED:
+# - tkinter: The standard Python library for creating Graphical User Interfaces (GUIs).
+# - pandas: Used for data manipulation, specifically for reading and writing Excel files.
+# - os, dotenv: Used to securely manage database credentials by loading them from
+#   a .env file as environment variables, avoiding hardcoding sensitive info.
+# - vertica_python: A Python client for connecting to the Vertica database.
+#
+# HOW IT WORKS:
+# 1. On startup, it connects to Vertica using credentials from a .env file.
+# 2. It queries the database for all tables and columns in the 'ER1' schema.
+# 3. This metadata is saved into 'input_columns.xlsx'.
+# 4. The application window opens, loading the data from the input file.
+# 5. The user navigates through each table one by one.
+# 6. For each table, the user can:
+#    a) Mark specific columns as 'key' or 'exclude'.
+#    b) Mark the entire table as 'stage' to skip it.
+# 7. The selections are saved to 'output_config.xlsx' as the user navigates or
+#    when they click 'Finish & Save'.
+#
+# =========================================================================================
+
+# --- Import necessary libraries ---
+import tkinter as tk
+from tkinter import ttk, messagebox, font # ttk for modern widgets, messagebox for popups, font for styling
+import pandas as pd # For handling data in DataFrames and Excel I/O
+import os # To access environment variables for credentials
+import sys # System-specific parameters and functions (not actively used but good practice)
+import vertica_python # The driver for connecting to Vertica
+from dotenv import load_dotenv # To load environment variables from a .env file
+
+# Load environment variables from a .env file in the same directory.
+# This is crucial for security, as it keeps credentials out of the source code.
+load_dotenv()
+
+class MigrationConfiguratorApp:
+    """
+    The main class for the GUI application. It encapsulates all the widgets,
+    data, and logic for the configurator tool.
+    """
+    def __init__(self, root):
+        """
+        The constructor for the app. It initializes the main window, sets up
+        initial state variables, defines file paths, and kicks off the setup process.
+        'root' is the main tkinter window.
+        """
+        # --- Basic Window and State Initialization ---
+        self.root = root
+        self.root.title("Data Migration Validation Configurator For Tables")
+        self.root.geometry("750x650") # Set initial window size
+        self.root.minsize(700, 600)  # Set minimum window size
+
+        # --- Application State Variables ---
+        # These variables hold the application's data and current state.
+        self.table_data = {}         # A dictionary to hold columns for each table, e.g., {'TABLE_A': ['col1', 'col2']}
+        self.table_names = []        # An ordered list of table names to navigate through
+        self.current_table_index = 0 # An index to keep track of which table is currently displayed
+        self.output_records = []     # A temporary list to buffer user selections before saving to Excel
+        self.column_vars = []        # A list to hold tkinter IntVars for each column's checkbox
+        self.is_table_staged = False # A flag to check if the current table has been marked as 'stage'
+
+        # --- File Configuration ---
+        # Define the names for the input (source) and output (result) files.
+        self.input_file = 'input_columns.xlsx'
+        self.output_file = 'output_config.xlsx'
+
+        # --- Initial Setup Calls ---
+        # These methods are called in sequence to build and launch the application.
+        self.setup_styles()             # 1. Configure the look and feel of widgets.
+        self.create_widgets()           # 2. Create and place all GUI elements on the window.
+        self.initialize_data_source()   # 3. Connect to the DB, create the input file, and load the data.
+
+    def _get_db_credentials(self):
+        """
+        Fetches database credentials from environment variables.
+        Using a private method convention (leading underscore) because this is an
+        internal helper function.
+        It's critical for security to use environment variables instead of hardcoding.
+        """
+        credentials = {
+            'host': os.getenv('VERTICA_HOST'),
+            'db': os.getenv('VERTICA_DB'),
+            'user': os.getenv('VERTICA_USER'),
+            'password': os.getenv('VERTICA_PASSWORD'),
+            'schema': 'ER1' # The schema is hardcoded as it's a fixed requirement for this app
+        }
+        # Validate that all required credentials were found.
+        missing = [key for key, value in credentials.items() if value is None and key != 'schema']
+        if missing:
+            # If any are missing, show an error and return None to signal failure.
+            messagebox.showerror(
+                "Environment Variables Missing",
+                f"The following required environment variables are not set in your .env file:\n\n{', '.join(missing).upper()}"
+            )
+            return None
+        return credentials
+
+    def _connect_to_vertica(self, host, db, user, password):
+        """
+        Establishes and returns a connection to the Vertica database.
+        This is another internal helper method.
+        """
+        self.log_message(f"Connecting to Vertica host: {host}...")
+        return vertica_python.connect(
+            host=host,
+            port=5433,      # Standard Vertica port
+            user=user,
+            password=password,
+            database=db,
+            autocommit=True # Ensures each SQL statement is committed automatically
+        )
+
+    def _create_input_file_from_vertica(self, creds):
+        """
+        Connects to Vertica, fetches all tables and columns from the specified schema,
+        and writes them to the input Excel file. This is the primary data source step.
+        """
+        all_data = [] # List to store {'table_name': ..., 'column_name': ...} dicts
+        conn = None   # Initialize connection to None for the finally block
+        
+        # A try/except/finally block is essential for database operations to ensure
+        # the connection is always closed, even if errors occur.
+        try:
+            conn = self._connect_to_vertica(creds['host'], creds['db'], creds['user'], creds['password'])
+            self.log_message("Connection successful.", "SUCCESS")
+            
+            # Use a 'with' statement for the cursor, which handles closing it automatically.
+            with conn.cursor() as cur:
+                self.log_message(f"Fetching tables from schema '{creds['schema']}'...")
+                # SQL to get all table names from the specified schema.
+                cur.execute("SELECT table_name FROM v_catalog.tables WHERE table_schema = %s", (creds['schema'],))
+                tables = [row[0] for row in cur.fetchall()] # Extract table names from query results
+                
+                self.log_message(f"Found {len(tables)} tables. Fetching their columns...")
+                # Loop through each table to get its columns.
+                for i, table in enumerate(tables):
+                    self.log_message(f"Processing table {i+1}/{len(tables)}: {table}")
+                    # SQL to get all column names for the current table.
+                    cur.execute("SELECT column_name FROM v_catalog.columns WHERE table_schema = %s AND UPPER(table_name) = UPPER(%s)", (creds['schema'], table))
+                    columns = [row[0] for row in cur.fetchall()]
+                    # For each column, create a record and add it to our data list.
+                    for col in columns:
+                        all_data.append({'table_name': table, 'column_name': col})
+
+            # Once all data is fetched, convert the list of dictionaries to a pandas DataFrame.
+            df = pd.DataFrame(all_data)
+            # Save the DataFrame to an Excel file, without the pandas index column.
+            df.to_excel(self.input_file, index=False)
+            self.log_message(f"Successfully created '{self.input_file}' with {len(df)} total columns.", "SUCCESS")
+            return True # Signal success
+
+        except Exception as e:
+            # If any error occurs during the process, log it and show a popup.
+            self.log_message(f"An error occurred: {e}", "ERROR")
+            messagebox.showerror("Vertica Error", f"Failed to fetch data from Vertica:\n\n{e}")
+            return False # Signal failure
+        finally:
+            # This block *always* runs, whether there was an error or not.
+            if conn:
+                conn.close()
+                self.log_message("Connection to Vertica closed.")
+
+    def initialize_data_source(self):
+        """
+        Orchestrates the initial data setup. It gets credentials and then
+        triggers the creation of the input file from Vertica. If this process
+        fails at any point, the application will close.
+        """
+        creds = self._get_db_credentials()
+        if not creds:
+            self.root.destroy() # Close the app if credentials are not found
+            return
+
+        # Attempt to create the input file from the database.
+        if self._create_input_file_from_vertica(creds):
+            # If successful, check if an output file exists. If not, create an empty one
+            # with the correct headers. This prevents errors when trying to append to it later.
+            if not os.path.exists(self.output_file):
+                pd.DataFrame(columns=['table_name', 'flag', 'column_name']).to_excel(self.output_file, index=False)
+            # Now that the input file is ready, load its data into the application.
+            self.load_data()
+        else:
+            # If creating the input file fails, close the application.
+            self.root.destroy()
+
+    def setup_styles(self):
+        """
+        Configures the visual style for all ttk (themed tkinter) widgets.
+        Centralizing style definitions here makes it easy to change the app's
+        look and feel without searching through the widget creation code.
+        """
+        self.style = ttk.Style(self.root)
+        self.style.theme_use('clam') # 'clam' is a clean, modern theme
+
+        # Define custom fonts for different elements.
+        self.title_font = font.Font(family="Helvetica", size=16, weight="bold")
+        self.label_font = font.Font(family="Helvetica", size=12)
+        self.bold_label_font = font.Font(family="Helvetica", size=12, weight="bold")
+        self.log_font = font.Font(family="Courier", size=10) # Monospaced font for logs
+
+        # Configure styles for specific widget types.
+        self.style.configure('TFrame', background='#f0f0f0') # Light grey background
+        self.style.configure('TLabel', background='#f0f0f0', font=self.label_font)
+        self.style.configure('Title.TLabel', font=self.title_font, foreground='#333')
+        self.style.configure('Header.TLabel', font=self.bold_label_font, foreground='#003366')
+        self.style.configure('TRadiobutton', background='#f0f0f0', font=self.label_font)
+        self.style.configure('TCheckbutton', background='#f0f0f0', font=self.label_font)
+        self.style.configure('TButton', font=self.label_font, padding=6)
+        
+        # Use .map() to define styles for different widget states (e.g., when a button is active).
+        self.style.map('TButton',
+            foreground=[('active', 'white'), ('!disabled', '#333')],
+            background=[('active', '#0078d7'), ('!disabled', '#e0e0e0')]
+        )
+        # Create a special style for the "Finish" button to make it stand out.
+        self.style.configure('Success.TButton', background='#28a745', foreground='white')
+        self.style.map('Success.TButton', background=[('active', '#218838')])
+
+    def create_widgets(self):
+        """
+        Creates and lays out all the GUI widgets. The layout is managed using
+        .pack() and .grid() within different frames for organization.
+        """
+        # --- Main Container Frame ---
+        # All other widgets will be placed inside this frame.
+        main_frame = ttk.Frame(self.root, padding="20")
+        main_frame.pack(fill=tk.BOTH, expand=True) # Fill all available space
+
+        # --- Top Frame (Table Name and Flag Selection) ---
+        top_frame = ttk.Frame(main_frame, padding="10")
+        top_frame.pack(fill=tk.X, pady=(0, 10))
+        top_frame.columnconfigure(1, weight=1) # Let the second column expand
+        
+        ttk.Label(top_frame, text="Current Table:", style='Header.TLabel').grid(row=0, column=0, sticky="w", pady=(0,10))
+        self.table_name_label = ttk.Label(top_frame, text="Loading...", style='Title.TLabel') # Will be updated with the table name
+        self.table_name_label.grid(row=0, column=1, sticky="w", pady=(0,10))
+
+        ttk.Label(top_frame, text="Select Flag:", style='Header.TLabel').grid(row=1, column=0, sticky="w", pady=(5,10))
+        self.flag_var = tk.StringVar() # This variable will hold the value of the selected radio button.
+        self.flag_frame = ttk.Frame(top_frame) # A frame to hold the radio buttons together
+        self.flag_frame.grid(row=1, column=1, sticky="w")
+        
+        # Radio buttons for selecting the configuration flag.
+        # The 'command' calls self.on_flag_change whenever a selection is made.
+        ttk.Radiobutton(self.flag_frame, text="Key", variable=self.flag_var, value="key", command=self.on_flag_change).pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(self.flag_frame, text="Exclude", variable=self.flag_var, value="exclude", command=self.on_flag_change).pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(self.flag_frame, text="Stage (Skip Table)", variable=self.flag_var, value="stage", command=self.on_flag_change).pack(side=tk.LEFT, padx=5)
+
+        # --- Columns Frame (Scrollable list of checkboxes) ---
+        # This is a complex widget to create a scrollable area.
+        columns_outer_frame = ttk.Frame(main_frame)
+        columns_outer_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+        ttk.Label(columns_outer_frame, text="Select Columns (if applicable):", style='Header.TLabel').pack(anchor="w", padx=10)
+        
+        # A Canvas widget is used to create a scrollable region.
+        canvas = tk.Canvas(columns_outer_frame, bg='#ffffff', highlightthickness=0)
+        scrollbar = ttk.Scrollbar(columns_outer_frame, orient="vertical", command=canvas.yview)
+        # This frame is placed *inside* the canvas and will hold the actual checkboxes.
+        self.columns_frame = ttk.Frame(canvas, style='TFrame')
+        
+        # This binding is crucial: when the size of the inner frame changes, it tells the canvas to update its scroll region.
+        self.columns_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        # Create a "window" on the canvas to display the inner frame.
+        canvas.create_window((0, 0), window=self.columns_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        # Pack the canvas and scrollbar to make them visible and functional.
+        canvas.pack(side="left", fill="both", expand=True, padx=(10,0), pady=5)
+        scrollbar.pack(side="right", fill="y", padx=(0,10), pady=5)
+
+        # --- Action Frame (Navigation and Control Buttons) ---
+        action_frame = ttk.Frame(main_frame)
+        action_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(10, 0))
+        # Configure columns to have equal weight so buttons spread out evenly.
+        action_frame.columnconfigure((0, 1, 2, 3), weight=1)
+
+        self.prev_button = ttk.Button(action_frame, text="Previous Table", command=self.previous_table)
+        self.prev_button.grid(row=0, column=0, padx=5, sticky="ew") # "ew" makes the button stretch horizontally
+
+        self.apply_button = ttk.Button(action_frame, text="Apply Selections", command=self.apply_selection)
+        self.apply_button.grid(row=0, column=1, padx=5, sticky="ew")
+
+        self.next_button = ttk.Button(action_frame, text="Next Table", command=self.next_table)
+        self.next_button.grid(row=0, column=2, padx=5, sticky="ew")
+        
+        self.finish_button = ttk.Button(action_frame, text="Finish & Save", command=self.finalize_process, style='Success.TButton')
+        self.finish_button.grid(row=0, column=3, padx=5, sticky="ew")
+
+        # --- Log Frame (For displaying status messages) ---
+        log_frame = ttk.LabelFrame(main_frame, text="Log", padding=10) # A frame with a border and title
+        log_frame.pack(fill=tk.BOTH, expand=True, side=tk.BOTTOM, pady=(15,0))
+        # The Text widget will display log messages. It's set to DISABLED to be read-only for the user.
+        self.log_text = tk.Text(log_frame, height=8, wrap=tk.WORD, state=tk.DISABLED, font=self.log_font, bg="#fdfdfd", relief=tk.SOLID, borderwidth=1)
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+
+    def log_message(self, message, level="INFO"):
+        """
+        A helper function to safely add messages to the log Text widget.
+        It temporarily enables the widget, adds text, and then disables it again.
+        """
+        self.log_text.config(state=tk.NORMAL) # Must be NORMAL to modify
+        self.log_text.insert(tk.END, f"[{level}] {message}\n")
+        self.log_text.config(state=tk.DISABLED) # Set back to DISABLED for read-only
+        self.log_text.see(tk.END) # Automatically scroll to the bottom
+
+    def load_data(self):
+        """
+        Reads the input Excel file using pandas and processes it into the
+        application's main data structure (self.table_data).
+        """
+        try:
+            df = pd.read_excel(self.input_file)
+            # Basic validation of the input file format.
+            if 'table_name' not in df.columns or 'column_name' not in df.columns:
+                messagebox.showerror("Error", "Input Excel must contain 'table_name' and 'column_name' columns.")
+                self.root.quit()
+                return
+            
+            # This is the core data processing step:
+            # - df.groupby('table_name'): Groups all rows by their table name.
+            # - ['column_name'].apply(list): For each group, it takes the 'column_name' series and turns it into a list.
+            # - .to_dict(): Converts the result into a dictionary.
+            # The result is self.table_data = {'TableA': ['col1', 'col2'], 'TableB': ['col_x']}
+            self.table_data = df.groupby('table_name')['column_name'].apply(list).to_dict()
+            self.table_names = list(self.table_data.keys()) # Get a list of just the table names for navigation.
+
+            if not self.table_names:
+                # Handle the case where the input file is empty or has no data.
+                messagebox.showerror("Error", "No data found in the input file.")
+                self.apply_button.config(state=tk.DISABLED)
+                self.next_button.config(state=tk.DISABLED)
+            else:
+                # If data is loaded successfully, display the first table.
+                self.display_current_table()
+                self.log_message(f"Successfully loaded {len(self.table_names)} tables from '{self.input_file}'.")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"An error occurred while loading data: {e}")
+            self.root.quit()
+
+    def display_current_table(self):
+        """
+        Updates the UI to show the data for the current table. This functi
