@@ -1,0 +1,418 @@
+Of course. Leaving behind well-documented code is a great practice. Here is your Python script, now with extensive comments explaining the logic, the purpose of each function and code block, and the "why" behind the implementation choices. This will help the next developer hit the ground running.
+Code Overview
+This script is a DDL (Data Definition Language) Comparator between a Vertica database and a Snowflake database. Its sole purpose is to compare the structure of the databases, not the data itself.
+It performs two main tasks:
+ * Table Comparison: It checks for tables that exist in one database but not the other. For tables that exist in both, it checks for columns that are missing from one or the other.
+ * View Comparison: It performs the same check for views, identifying missing views and missing columns within common views.
+All identified discrepancies (e.g., "Table X is in Snowflake but not Vertica," "Column Y is in table Z in Vertica but not in Snowflake") are logged into a dedicated results table in a development Vertica database for analysis.
+Commented Code
+# =========================================================================================
+#              VERTICA TO SNOWFLAKE DDL (SCHEMA) COMPARISON SCRIPT
+# =========================================================================================
+#
+# OVERVIEW:
+# This script compares the database schema (tables, views, and their columns) between
+# a Vertica database and a Snowflake database. It does NOT compare the actual data
+# within the tables. Its purpose is to identify structural differences, such as:
+#   - Tables or views that exist in one database but not the other.
+#   - Columns that exist in a common table/view in one database but are missing
+#     from the other.
+#
+# LIBRARIES USED:
+# - pandas: Used to structure the identified mismatches into a DataFrame before writing to the database.
+# - snowflake.connector: The official Python driver for connecting to Snowflake.
+# - vertica_python: The Python driver for connecting to Vertica.
+# - os, dotenv: Used to load database credentials and other configuration from a
+#   .env file, which is a security best practice to avoid hardcoding secrets.
+#
+# EXECUTION FLOW:
+# 1. Load configuration from environment variables.
+# 2. Establish connections to the source databases (Vertica and Snowflake) and a
+#    destination Vertica database for logging results.
+# 3. Perform the TABLE comparison:
+#    a. Fetch lists of all tables from both databases.
+#    b. Identify tables that are not present in both.
+#    c. For common tables, fetch their column lists and identify missing columns.
+#    d. Write all table-related mismatches to a results table.
+# 4. Perform the VIEW comparison (following the same logic as tables).
+# 5. Close all database connections securely.
+#
+# =========================================================================================
+
+import os
+import pandas as pd
+import snowflake.connector
+import vertica_python
+from dotenv import load_dotenv
+
+# --- PANDAS DISPLAY SETTINGS ---
+# These options configure pandas to display all rows and columns of a DataFrame
+# when printed to the console. This is useful for debugging.
+pd.set_option("display.max_rows", None)
+pd.set_option("display.max_columns", None)
+pd.set_option("display.width", None)
+pd.set_option("display.max_colwidth", None)
+
+# --- CONFIGURATION LOADING ---
+# Load environment variables from a .env file in the same directory.
+# This allows for easy configuration without modifying the script's code.
+load_dotenv()
+SCHEMA = os.getenv("ER1_SCHEMA", "ER1") # The schema to compare in both databases.
+OUTPUT_TABLE = "vertica_snowflake_ddl_comparison" # The table where results will be stored.
+
+def normalize(name: str) -> str:
+    """
+    Returns a standardized, case-insensitive version of a string.
+    This is CRITICAL for comparison because databases like Vertica and Snowflake
+    can have different default casing for object names (e.g., 'MY_TABLE' vs. 'my_table').
+    Using casefold() is a robust way to handle case-insensitive comparisons.
+    """
+    return name.casefold()
+
+# --- DATABASE CONNECTION FUNCTIONS ---
+# Each connection function is specific to its purpose and database. This separation
+# makes the code cleaner and easier to debug connection issues.
+
+def connect_to_snowflake_for_tables():
+    """Establishes a connection to the source Snowflake database for tables."""
+    print("Connecting to source Snowflake for tables...")
+    try:
+        conn = snowflake.connector.connect(
+            account = URL_SF.split("//")[-1].split(".snowflakecomputing.com")[0], # Extracts account name from URL
+            user=USER_SDL_SF,
+            private_key_file=os.path.join(KEYTAB_DIR, KEYTAB_FILE_SDL_SF), # Path to the private key for authentication
+            private_key_file_pwd=PASSWORD_SDL_SF, # Passphrase for the private key
+            database=DB_SDL_SF, # The specific database for tables
+            schema=SCHEMA_SDL_SF,
+            warehouse=WAREHOUSE_SDL_SF,
+            role=ROLE_SDL_SF,
+            authenticator=SNOWFLAKE_JWT
+        )
+        print("Source Snowflake for tables connected.")
+        return conn
+    except Exception as e:
+        print(f"Error connecting to source Snowflake for tables: {e}")
+        raise # Re-raise the exception to stop the script if connection fails.
+
+def connect_to_snowflake_for_views():
+    """Establishes a connection to the source Snowflake database for views."""
+    print("Connecting to source Snowflake for views...")
+    try:
+        conn = snowflake.connector.connect(
+            account = URL_SF.split("//")[-1].split(".snowflakecomputing.com")[0],
+            user=USER_SDL_SF,
+            private_key_file=os.path.join(KEYTAB_DIR, KEYTAB_FILE_SDL_SF),
+            private_key_file_pwd=PASSWORD_SDL_SF,
+            database=DB_SDL_SF_VW, # Note: Connects to a different database specified for views.
+            schema=SCHEMA_SDL_SF,
+            warehouse=WAREHOUSE_SDL_SF,
+            role=ROLE_SDL_SF,
+            authenticator=SNOWFLAKE_JWT
+        )
+        print("Source Snowflake for views connected.")
+        return conn
+    except Exception as e:
+        print(f"Error connecting to source Snowflake for views: {e}")
+        raise
+
+def connect_to_vertica():
+    """Establishes a connection to the source Vertica database."""
+    print("Connecting to source Vertica...")
+    try:
+        conn = vertica_python.connect(
+            host=VERTICA_HOST,
+            port=5433,
+            user=VERTICA_USER,
+            password=VERTICA_PASSWORD,
+            database=VERTICA_DB,
+            autocommit=True # Ensures each SQL statement is committed automatically.
+        )
+        print("Source Vertica connected.")
+        return conn
+    except Exception as e:
+        print(f"Error connecting to source Vertica: {e}")
+        raise
+
+def connect_to_vertica_dev():
+    """Establishes a connection to the destination Vertica DEV database for logging results."""
+    print("Connecting to destination Vertica (DEV)...")
+    try:
+        conn = vertica_python.connect(
+            host=VERTICA_HOST_DEV,
+            port= 5433,
+            user=VERTICA_USER_DEV,
+            password=VERTICA_PASSWORD_DEV,
+            database=VERTICA_DB_DEV,
+            autocommit=True
+        )
+        print("Destination Vertica (DEV) connected.")
+        return conn
+    except Exception as e:
+        print(f"Error connecting to destination Vertica (DEV): {e}")
+        raise
+
+# --- METADATA FETCHING FUNCTIONS ---
+# These functions query the database's internal metadata catalogs to get lists of objects.
+
+def get_snowflake_tables(conn, schema_name):
+    """Fetches all table names from a given schema in Snowflake."""
+    with conn.cursor() as cur:
+        # INFORMATION_SCHEMA.TABLES is the standard way to get table metadata in Snowflake.
+        cur.execute(f"SELECT table_name FROM INFORMATION_SCHEMA.TABLES WHERE table_schema = %s", (schema_name,))
+        return [row[0] for row in cur.fetchall()] # Extracts the first element (table_name) from each row.
+
+def get_vertica_tables(conn, schema_name):
+    """Fetches all table names from a given schema in Vertica."""
+    with conn.cursor() as cur:
+        # Vertica uses its own system catalog, v_catalog, for metadata.
+        cur.execute(f"SELECT table_name FROM v_catalog.tables WHERE table_schema = %s", (schema_name,))
+        return [row[0] for row in cur.fetchall()]
+
+def get_snowflake_columns(conn, table_name, schema_name):
+    """Fetches all column names for a given table/view from Snowflake."""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT column_name FROM INFORMATION_SCHEMA.COLUMNS WHERE table_schema = %s AND table_name = %s", (schema_name, table_name))
+        return [row[0] for row in cur.fetchall()]
+
+def get_vertica_table_columns(conn, table_name, schema_name):
+    """Fetches all column names for a given table from Vertica."""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT column_name FROM v_catalog.columns WHERE table_schema = %s AND UPPER(table_name) = UPPER(%s)", (schema_name, table_name))
+        return [row[0] for row in cur.fetchall()]
+
+def get_snowflake_views(conn, schema_name):
+    """Fetches all view names from a given schema in Snowflake."""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT table_name FROM INFORMATION_SCHEMA.VIEWS WHERE table_schema = %s", (schema_name,))
+        return [row[0] for row in cur.fetchall()]
+
+def get_vertica_views(conn, schema_name):
+    """Fetches all view names from a given schema in Vertica."""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT table_name FROM v_catalog.views WHERE table_schema = %s", (schema_name,))
+        return [row[0] for row in cur.fetchall()]
+
+def get_vertica_view_columns(conn, view_name, schema_name):
+    """Fetches all column names for a given view from Vertica."""
+    with conn.cursor() as cur:
+        # Note: Vertica has a separate catalog for view columns.
+        cur.execute(f"SELECT column_name FROM v_catalog.view_columns WHERE table_schema = %s AND UPPER(table_name) = UPPER(%s)", (schema_name, view_name))
+        return [row[0] for row in cur.fetchall()]
+
+# --- RESULT WRITING FUNCTIONS ---
+# These functions are responsible for persisting the found mismatches to the database.
+
+def write_table_mismatches_to_vertica(conn, mismatches_df):
+    """Clears old data from the target table and writes the new table mismatch DataFrame to Vertica."""
+    if mismatches_df.empty:
+        print("\nNo table mismatches found. Nothing to write.")
+        return
+
+    print(f"\nWriting {len(mismatches_df)} table mismatches to Vertica table: {OUTPUT_TABLE}...")
+    with conn.cursor() as cur:
+        try:
+            # First, delete old data to keep the results table clean and relevant.
+            # This deletes records older than 7 days OR from the current day to allow for reruns.
+            print(f"Deleting old data from ER1.{OUTPUT_TABLE}...")
+            delete_query = f"DELETE FROM ER1.{OUTPUT_TABLE} WHERE insrt_ts < CURRENT_TIMESTAMP - INTERVAL '7 DAY' OR CURRENT_DATE = TRUNC(insrt_ts)"
+            cur.execute(delete_query)
+            print("Old data cleared.")
+
+            # Prepare the INSERT statement.
+            insert_query = f"""
+                INSERT INTO ER1.{OUTPUT_TABLE} (table_name, column_name, object_type, present_in_vertica, present_in_snowflake)
+                VALUES (%s, %s, %s, %s, %s)
+            """
+            # Convert the pandas DataFrame to a list of tuples, which is the format executemany expects.
+            data_to_insert = [tuple(row) for row in mismatches_df.to_numpy()]
+
+            # Use executemany for efficient bulk insertion.
+            cur.executemany(insert_query, data_to_insert)
+            conn.commit() # Explicitly commit the transaction.
+            print(f"Successfully inserted {len(data_to_insert)} records.")
+
+        except Exception as e:
+            # If an error occurs during the write, roll back any partial changes and report the error.
+            print(f"An error occurred while writing to Vertica: {e}")
+            conn.rollback()
+            raise
+
+def write_view_mismatches_to_vertica(conn, mismatches_df):
+    """Writes the view mismatch DataFrame to the Vertica results table."""
+    if mismatches_df.empty:
+        print("\nNo view mismatches found. Nothing to write.")
+        return
+
+    print(f"\nWriting {len(mismatches_df)} view mismatches to Vertica table: {OUTPUT_TABLE}...")
+    with conn.cursor() as cur:
+        try:
+            # Unlike the table function, this one appends. The table function clears old data for both.
+            insert_query = f"""
+                INSERT INTO ER1.{OUTPUT_TABLE} (table_name, column_name, object_type, present_in_vertica, present_in_snowflake)
+                VALUES (%s, %s, %s, %s, %s)
+            """
+            data_to_insert = [tuple(row) for row in mismatches_df.to_numpy()]
+
+            cur.executemany(insert_query, data_to_insert)
+            conn.commit()
+            print(f"Successfully inserted {len(data_to_insert)} records.")
+
+        except Exception as e:
+            print(f"An error occurred while writing to Vertica: {e}")
+            conn.rollback()
+            raise
+
+# --- MAIN EXECUTION LOGIC ---
+
+def main_table(config):
+    """Main function to orchestrate the comparison of TABLES."""
+    # This block re-assigns global variables from the passed config dictionary.
+    # This is one way to manage configuration, though passing them as direct
+    # parameters to functions can sometimes be cleaner.
+    global VERTICA_HOST, VERTICA_USER, VERTICA_PASSWORD, VERTICA_DB
+    global VERTICA_HOST_DEV, VERTICA_USER_DEV, VERTICA_PASSWORD_DEV, VERTICA_DB_DEV
+    global URL_SF, KEYTAB_FILE_SDL_SF, PASSWORD_SDL_SF, DB_SDL_SF
+    global DB_SDL_SF_VW, SCHEMA_SDL_SF, USER_SDL_SF, WAREHOUSE_SDL_SF
+    global ROLE_SDL_SF, KEYTAB_DIR, DATA_DIR_VAR, SNOWFLAKE_JWT
+
+    VERTICA_HOST = config["VERTICA_HOST"]
+    # ... (all other config assignments) ...
+    
+    # Initialize connection variables to None.
+    sf_conn = None
+    vt_conn = None
+    vt_dev_conn = None
+
+    # Use a try...finally block to ensure connections are always closed.
+    try:
+        # --- 1. Connect and Fetch Initial Lists ---
+        sf_conn = connect_to_snowflake_for_tables()
+        vt_conn = connect_to_vertica()
+        vt_dev_conn = connect_to_vertica_dev()
+        sf_tables = get_snowflake_tables(sf_conn, SCHEMA)
+        vt_tables = get_vertica_tables(vt_conn, SCHEMA)
+
+        # --- 2. Normalize and Compare Table Lists ---
+        # Create dictionaries mapping the normalized name to the original name.
+        sf_table_map = {normalize(t): t for t in sf_tables}
+        vt_table_map = {normalize(t): t for t in vt_tables}
+
+        # Create sets of the normalized names for efficient comparison.
+        sf_norm_set = set(sf_table_map.keys())
+        vt_norm_set = set(vt_table_map.keys())
+
+        mismatches = []
+        # Find tables that exist only in Snowflake (set difference).
+        tables_only_in_sf = sf_norm_set - vt_norm_set
+        # Find tables that exist only in Vertica.
+        tables_only_in_vt = vt_norm_set - sf_norm_set
+
+        # Log tables that are only in Snowflake.
+        for norm_table in sorted(tables_only_in_sf):
+            mismatches.append({
+                "TableName": sf_table_map[norm_table], "ColumnName": "N/A",
+                "ObjectType": "table", "PresentInVertica": "N", "PresentInSnowflake": "Y",
+            })
+
+        # Log tables that are only in Vertica.
+        for norm_table in sorted(tables_only_in_vt):
+            mismatches.append({
+                "TableName": vt_table_map[norm_table], "ColumnName": "N/A",
+                "ObjectType": "table", "PresentInVertica": "Y", "PresentInSnowflake": "N",
+            })
+
+        # --- 3. Compare Columns for Common Tables ---
+        # Find the intersection of tables that exist in both databases.
+        common_tables = sorted(sf_norm_set.intersection(vt_norm_set))
+        print(f"\nFound {len(common_tables)} common tables to compare for column differences...")
+
+        for norm_table in common_tables:
+            # Get the original table names (with correct casing).
+            sf_table_name = sf_table_map[norm_table]
+            vt_table_name = vt_table_map[norm_table]
+
+            # Fetch the columns for the current common table from both databases.
+            sf_cols = get_snowflake_columns(sf_conn, sf_table_name, SCHEMA)
+            vt_cols = get_vertica_table_columns(vt_conn, vt_table_name, SCHEMA)
+
+            # Normalize the column names for comparison.
+            sf_col_map = {normalize(col): col for col in sf_cols}
+            vt_col_map = {normalize(col): col for col in vt_cols}
+            sf_col_norm_set = set(sf_col_map.keys())
+            vt_col_norm_set = set(vt_col_map.keys())
+
+            # Find and log columns that exist only in one database.
+            cols_only_in_sf = sf_col_norm_set - vt_col_norm_set
+            cols_only_in_vt = vt_col_norm_set - sf_col_norm_set
+
+            for col_norm in sorted(cols_only_in_sf):
+                mismatches.append({
+                    "TableName": sf_table_name, "ColumnName": sf_col_map[col_norm],
+                    "ObjectType": "column", "PresentInVertica": "N", "PresentInSnowflake": "Y",
+                })
+
+            for col_norm in sorted(cols_only_in_vt):
+                mismatches.append({
+                    "TableName": sf_table_name, "ColumnName": vt_col_map[col_norm],
+                    "ObjectType": "column", "PresentInVertica": "Y", "PresentInSnowflake": "N",
+                })
+
+        # --- 4. Report and Write Results ---
+        if not mismatches:
+            print("\n=== TABLE COMPARISON COMPLETE: No mismatches found. ===")
+        else:
+            # Convert the list of mismatch dictionaries into a pandas DataFrame.
+            final_df = pd.DataFrame(mismatches)
+            print("\n=== TABLE MISMATCHES FOUND ===")
+            # The results are written to the database instead of being printed to the console.
+            write_table_mismatches_to_vertica(vt_dev_conn, final_df)
+
+    except Exception as e:
+        print(f"\nAn unexpected error occurred in main_table execution: {e}")
+    finally:
+        # This block ensures connections are closed even if an error occurred.
+        if sf_conn:
+            sf_conn.close()
+            print("\nTable Snowflake connection closed.")
+        if vt_conn:
+            vt_conn.close()
+            print("Table Vertica source connection closed.")
+        if vt_dev_conn:
+            vt_dev_conn.close()
+            print("Table Vertica dev connection closed.")
+
+def main_views(config):
+    """Main function to orchestrate the comparison of VIEWS."""
+    # This function follows the exact same logic as main_table, but operates on
+    # views and uses the view-specific connection and metadata functions.
+    
+    # ... (config assignment block is identical to main_table) ...
+    
+    sf_conn = None
+    vt_conn = None
+    vt_dev_conn = None
+
+    try:
+        # --- 1. Connect and Fetch Initial Lists ---
+        sf_conn = connect_to_snowflake_for_views()
+        vt_conn = connect_to_vertica()
+        vt_dev_conn = connect_to_vertica_dev()
+
+        sf_views = get_snowflake_views(sf_conn, SCHEMA)
+        vt_views = get_vertica_views(vt_conn, SCHEMA)
+
+        # --- 2. Normalize and Compare View Lists ---
+        sf_view_map = {normalize(t): t for t in sf_views}
+        vt_view_map = {normalize(t): t for t in vt_views}
+        sf_norm_set = set(sf_view_map.keys())
+        vt_norm_set = set(vt_view_map.keys())
+
+        mismatches = []
+        views_only_in_sf = sf_norm_set - vt_norm_set
+        views_only_in_vt = vt_norm_set - sf_norm_set
+
+        # Log views only in Snowflake
+        for norm_view in sorted(views_only_in_sf):
+            mismatches.append({
+                "ViewName": sf_view_map[norm_view], "ColumnName": "N/A",
+                "ObjectType
