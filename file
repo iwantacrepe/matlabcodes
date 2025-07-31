@@ -1,565 +1,414 @@
-Of course! Here is your Python code, thoroughly commented to explain the logic, structure, and the "what" and "why" behind each part. This will help the next developer understand and maintain the application.
-This application is a Data Migration Validation Configurator. Its main purpose is to:
- * Connect to a Vertica database to get a list of all tables and their columns within a specific schema.
- * Create an input_columns.xlsx file with this information.
- * Provide a graphical user interface (GUI) built with tkinter for a user to review each table.
- * Allow the user to flag columns in each table as either a 'key' (primary key/identifier) or 'exclude' (column to be ignored during validation), or to flag an entire table as 'stage' (to be skipped entirely).
- * Save these user-defined configurations into an output_config.xlsx file, which can then be used by another process or script for data migration validation.
+Of course. Here is your Python script with detailed comments explaining the logic and the purpose behind each section. This will help the next developer understand, maintain, and extend the code.
+Code Overview
+This script performs a data validation and comparison between Vertica (source) and Snowflake (target) databases. Its primary goal is to identify discrepancies in data for a given set of tables.
+How it works:
+ * Configuration: It reads an Excel file (table.xlsx) that specifies which tables to compare. For each table, the file defines key columns (for joining), columns to exclude from comparison, and an optional filter column (e.g., a timestamp for incremental checks).
+ * Connection: It connects to both Vertica and Snowflake using credentials stored as environment variables. It uses a separate connection for writing results to avoid transaction conflicts.
+ * Batch Processing: For each table, it fetches data from both databases in manageable chunks (batches). The batch size is dynamically adjusted based on the number of columns to prevent memory overload.
+ * Comparison: It compares the data row-by-row and column-by-column. It checks for:
+   * Rows that exist in one database but not the other.
+   * Mismatched values in common columns.
+ * Logging: All discrepancies are written into a specific Vertica table (ER1.vertica_snowflake_table_data_comparison) for later analysis.
+ * Summary: After processing all tables, it prints a summary to the console.
 Commented Code
 # =========================================================================================
-#                    DATA MIGRATION VALIDATION CONFIGURATOR
+#                    VERTICA TO SNOWFLAKE DATA VALIDATION SCRIPT
 # =========================================================================================
 #
 # OVERVIEW:
-# This script creates a desktop application that helps users configure validation rules
-# for a data migration process. It fetches table and column metadata from a Vertica
-# database, presents it to the user in a GUI, and saves the user's configuration
-# choices to an Excel file.
+# This script is designed to compare data between tables in a Vertica database (source)
+# and a Snowflake database (target). It reads a configuration from an Excel file to
+# determine which tables and columns to compare. Any identified discrepancies are
+# logged into a results table in Vertica for review.
 #
 # LIBRARIES USED:
-# - tkinter: The standard Python library for creating Graphical User Interfaces (GUIs).
-# - pandas: Used for data manipulation, specifically for reading and writing Excel files.
-# - os, dotenv: Used to securely manage database credentials by loading them from
-#   a .env file as environment variables, avoiding hardcoding sensitive info.
-# - vertica_python: A Python client for connecting to the Vertica database.
+# - pandas: For data manipulation, reading the config file, and handling data in DataFrames.
+# - snowflake.connector: The official Python driver for connecting to Snowflake.
+# - vertica_python: The Python driver for connecting to Vertica.
+# - os: Used to construct file paths for credentials.
+# - datetime: Used for handling date/time values, particularly for filtering.
 #
-# HOW IT WORKS:
-# 1. On startup, it connects to Vertica using credentials from a .env file.
-# 2. It queries the database for all tables and columns in the 'ER1' schema.
-# 3. This metadata is saved into 'input_columns.xlsx'.
-# 4. The application window opens, loading the data from the input file.
-# 5. The user navigates through each table one by one.
-# 6. For each table, the user can:
-#    a) Mark specific columns as 'key' or 'exclude'.
-#    b) Mark the entire table as 'stage' to skip it.
-# 7. The selections are saved to 'output_config.xlsx' as the user navigates or
-#    when they click 'Finish & Save'.
+# EXECUTION FLOW:
+# 1. Load constants and configuration from environment variables and a local Excel file.
+# 2. Establish connections to Snowflake and Vertica.
+# 3. Clean up old results from the logging table in Vertica.
+# 4. Loop through each table specified in the Excel configuration.
+# 5. For each table:
+#    a. Fetch data in batches from both databases.
+#    b. Compare the batches row by row.
+#    c. Insert any found mismatches into the Vertica results table.
+# 6. Close all database connections.
+# 7. Print a final summary of the comparison results.
 #
 # =========================================================================================
 
-# --- Import necessary libraries ---
-import tkinter as tk
-from tkinter import ttk, messagebox, font # ttk for modern widgets, messagebox for popups, font for styling
-import pandas as pd # For handling data in DataFrames and Excel I/O
-import os # To access environment variables for credentials
-import sys # System-specific parameters and functions (not actively used but good practice)
-import vertica_python # The driver for connecting to Vertica
-from dotenv import load_dotenv # To load environment variables from a .env file
+import os
+import pandas as pd
+import snowflake.connector
+import vertica_python
+from datetime import datetime
 
-# Load environment variables from a .env file in the same directory.
-# This is crucial for security, as it keeps credentials out of the source code.
-load_dotenv()
+# --- CONFIGURATION & CONSTANTS ---
+# These variables are expected to be set as environment variables in the execution
+# environment (e.g., in a Docker container, Jenkins job, or shell profile).
+# This approach avoids hardcoding sensitive credentials directly in the script.
 
-class MigrationConfiguratorApp:
+# Vertica Production Credentials
+VERTICA_HOST = VERTICA_HOST
+VERTICA_USER = VERTICA_USER
+VERTICA_PASSWORD = VERTICA_PASSWORD
+VERTICA_DB = VERTICA_DB
+
+# Snowflake Credentials
+URL_SF = URL_SF
+KEYTAB_FILE_SDL_SF = KEYTAB_FILE_SDL_SF # Private key file for JWT authentication
+PASSWORD_SDL_SF = PASSWORD_SDL_SF       # Passphrase for the private key
+DB_SDL_SF = DB_SDL_SF
+DB_SDL_SF_VW = DB_SDL_SF_VW
+SCHEMA_SDL_SF = SCHEMA_SDL_SF
+USER_SDL_SF = USER_SDL_SF
+WAREHOUSE_SDL_SF = WAREHOUSE_SDL_SF
+ROLE_SDL_SF = ROLE_SDL_SF
+KEYTAB_DIR = KEYTAB_DIR                 # Directory where the private key is stored
+DATA_DIR_VAR = DATA_DIR_VAR,
+SNOWFLAKE_JWT = "SNOWFLAKE_JWT"         # Specifies the JWT authentication method
+
+# --- FILE & PATH CONFIGURATION ---
+FILE_NAME = "table.xlsx"
+XLS_PATH_TABLE = DATA_DIR_VAR[0] + FILE_NAME # Full path to the input configuration Excel file
+
+# --- PANDAS DISPLAY SETTINGS ---
+# These options configure pandas to display all rows and columns of a DataFrame
+# when printed to the console, which is useful for debugging.
+pd.set_option("display.max_rows", None)
+pd.set_option("display.max_columns", None)
+pd.set_option("display.width", None)
+pd.set_option("display.max_colwidth", None)
+
+# --- SCRIPT-LEVEL PARAMETERS ---
+SCHEMA = "ER1"  # The database schema to work within for both Vertica and Snowflake.
+START_DATETIME = "2020-10-01 00:00:00" # A default start date for incremental filtering.
+
+# Parameters for dynamic batch size calculation.
+BASELINE_BATCH_SIZE = 100000  # The batch size for a table with a standard number of columns.
+BASELINE_COLS = 50            # The standard number of columns used as a baseline.
+MIN_BATCH_SIZE = 10000        # The absolute minimum batch size to use, regardless of column count.
+
+# A default list of columns to always exclude from comparison (e.g., ETL metadata).
+DEFAULT_EXCLUDE_COLS = [
+    "INSRT_TS", "UPDT_TS", "ETL_TRNS", "ETL_JOB", "INSRT_TR", "INSRT_JB",
+    "CREATION_DATE_TIME", "UPDT_TR", "UPDT_JB", "LAST_UPDATED_DATE"
+]
+
+def calculate_dynamic_batch_size(num_columns):
     """
-    The main class for the GUI application. It encapsulates all the widgets,
-    data, and logic for the configurator tool.
+    Calculates batch size dynamically based on the number of columns to fetch.
+    The goal is to manage memory usage by fetching fewer rows when there are many columns.
+    This keeps the total data points per batch (rows * columns) relatively consistent.
     """
-    def __init__(self, root):
-        """
-        The constructor for the app. It initializes the main window, sets up
-        initial state variables, defines file paths, and kicks off the setup process.
-        'root' is the main tkinter window.
-        """
-        # --- Basic Window and State Initialization ---
-        self.root = root
-        self.root.title("Data Migration Validation Configurator For Tables")
-        self.root.geometry("750x650") # Set initial window size
-        self.root.minsize(700, 600)  # Set minimum window size
+    if num_columns <= 0:
+        return BASELINE_BATCH_SIZE  # Return default if column count is invalid.
 
-        # --- Application State Variables ---
-        # These variables hold the application's data and current state.
-        self.table_data = {}         # A dictionary to hold columns for each table, e.g., {'TABLE_A': ['col1', 'col2']}
-        self.table_names = []        # An ordered list of table names to navigate through
-        self.current_table_index = 0 # An index to keep track of which table is currently displayed
-        self.output_records = []     # A temporary list to buffer user selections before saving to Excel
-        self.column_vars = []        # A list to hold tkinter IntVars for each column's checkbox
-        self.is_table_staged = False # A flag to check if the current table has been marked as 'stage'
+    # Calculate the target "data load" based on our baseline constants.
+    target_data_load = BASELINE_BATCH_SIZE * BASELINE_COLS
 
-        # --- File Configuration ---
-        # Define the names for the input (source) and output (result) files.
-        self.input_file = 'input_columns.xlsx'
-        self.output_file = 'output_config.xlsx'
+    # Calculate the ideal batch size for the given number of columns.
+    dynamic_size = int(target_data_load / num_columns)
+    
+    # Ensure the calculated size is within our defined min/max bounds.
+    return max(MIN_BATCH_SIZE, min(dynamic_size, BASELINE_BATCH_SIZE))
 
-        # --- Initial Setup Calls ---
-        # These methods are called in sequence to build and launch the application.
-        self.setup_styles()             # 1. Configure the look and feel of widgets.
-        self.create_widgets()           # 2. Create and place all GUI elements on the window.
-        self.initialize_data_source()   # 3. Connect to the DB, create the input file, and load the data.
+def is_datetime_type(dtype):
+    """
+    Checks if a column's data type string represents a date, time, or timestamp.
+    This is used to apply special formatting (casting to DATE) to these columns
+    to avoid comparison issues related to timezones or fractional seconds.
+    """
+    if not isinstance(dtype, str):
+        return False
+    dtype_upper = dtype.upper()
+    return 'TIMESTAMP' in dtype_upper or 'DATE' in dtype_upper or 'TIME' in dtype_upper
 
-    def _get_db_credentials(self):
-        """
-        Fetches database credentials from environment variables.
-        Using a private method convention (leading underscore) because this is an
-        internal helper function.
-        It's critical for security to use environment variables instead of hardcoding.
-        """
-        credentials = {
-            'host': os.getenv('VERTICA_HOST'),
-            'db': os.getenv('VERTICA_DB'),
-            'user': os.getenv('VERTICA_USER'),
-            'password': os.getenv('VERTICA_PASSWORD'),
-            'schema': 'ER1' # The schema is hardcoded as it's a fixed requirement for this app
-        }
-        # Validate that all required credentials were found.
-        missing = [key for key, value in credentials.items() if value is None and key != 'schema']
-        if missing:
-            # If any are missing, show an error and return None to signal failure.
-            messagebox.showerror(
-                "Environment Variables Missing",
-                f"The following required environment variables are not set in your .env file:\n\n{', '.join(missing).upper()}"
-            )
-            return None
-        return credentials
+def connect_to_snowflake():
+    """
+    Establishes and returns a connection to Snowflake using private key authentication.
+    """
+    print("Connecting to Snowflake...")
+    return snowflake.connector.connect(
+        account=URL_SF.split("//")[-1].split(".snowflakecomputing.com")[0], # Extracts the account name from the URL
+        user=USER_SDL_SF,
+        private_key_file=os.path.join(KEYTAB_DIR, KEYTAB_FILE_SDL_SF), # Full path to the private key
+        private_key_file_pwd=PASSWORD_SDL_SF, # Passphrase for the key
+        database=DB_SDL_SF,
+        schema=SCHEMA_SDL_SF,
+        warehouse=WAREHOUSE_SDL_SF,
+        role=ROLE_SDL_SF,
+        authenticator=SNOWFLAKE_JWT
+    )
 
-    def _connect_to_vertica(self, host, db, user, password):
-        """
-        Establishes and returns a connection to the Vertica database.
-        This is another internal helper method.
-        """
-        self.log_message(f"Connecting to Vertica host: {host}...")
-        return vertica_python.connect(
-            host=host,
-            port=5433,      # Standard Vertica port
-            user=user,
-            password=password,
-            database=db,
-            autocommit=True # Ensures each SQL statement is committed automatically
-        )
+def connect_to_vertica():
+    """
+    Establishes and returns a connection to the production Vertica database.
+    """
+    print("Connecting to Vertica...")
+    return vertica_python.connect(
+        host=VERTICA_HOST,
+        port=5433,
+        user=VERTICA_USER,
+        password=VERTICA_PASSWORD,
+        database=VERTICA_DB,
+        autocommit=True  # Ensures each statement is committed automatically.
+    )
 
-    def _create_input_file_from_vertica(self, creds):
-        """
-        Connects to Vertica, fetches all tables and columns from the specified schema,
-        and writes them to the input Excel file. This is the primary data source step.
-        """
-        all_data = [] # List to store {'table_name': ..., 'column_name': ...} dicts
-        conn = None   # Initialize connection to None for the finally block
+def get_snowflake_columns_and_types(conn, table):
+    """
+    Fetches column names and their data types for a given table from Snowflake's
+    metadata catalog (INFORMATION_SCHEMA).
+    Returns a dictionary like {'COLUMN_NAME': 'DATA_TYPE'}.
+    """
+    with conn.cursor() as cur:
+        # This query retrieves metadata directly from Snowflake.
+        cur.execute("""
+            SELECT column_name, data_type
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE table_schema = %s AND UPPER(table_name) = %s
+            ORDER BY ordinal_position
+        """, (SCHEMA, table.upper()))
+        return {r[0]: r[1] for r in cur.fetchall()} # Convert result to a dictionary
+
+def get_vertica_columns_and_types(conn, table):
+    """
+    Fetches column names and their data types for a given table from Vertica's
+    metadata catalog (v_catalog).
+    Returns a dictionary like {'COLUMN_NAME': 'DATA_TYPE'}.
+    """
+    with conn.cursor() as cur:
+        # This query retrieves metadata directly from Vertica.
+        cur.execute("""
+            SELECT column_name, data_type
+            FROM v_catalog.columns
+            WHERE table_schema = %s AND LOWER(table_name) = %s
+            ORDER BY ordinal_position
+        """, (SCHEMA, table.lower()))
+        return {r[0]: r[1] for r in cur.fetchall()} # Convert result to a dictionary
+
+def get_row_count(conn, table, schema, filter_col=None, start_datetime=None):
+    """
+    Gets the total row count for a table. If a filter column and start date are
+    provided, it gets the count for the filtered subset. This is a quick check
+    to see if tables are empty before attempting a full comparison.
+    """
+    query = f'SELECT COUNT(*) FROM "{schema}"."{table}"'
+    params = ()
+    # If a filter is specified, add a WHERE clause to the query.
+    if filter_col and start_datetime:
+        query += f' WHERE "{filter_col}" >= %s'
+        params = (start_datetime,)
+
+    with conn.cursor() as cur:
+        cur.execute(query, params)
+        return cur.fetchone()[0] # Returns the first value of the first row (the count).
+
+def resolve_columns(requested, actual, force_upper=False):
+    """
+    Resolves a list of requested column names against a list of actual available
+    column names from the database, performing a case-insensitive match.
+    This is crucial because column casing can differ between databases or in the config file.
+    """
+    resolved = []
+    # Create a mapping of lowercase actual column names to their original casing.
+    actual_map = {col.casefold(): col for col in actual}
+    for col in requested:
+        # Check if the lowercase version of the requested column exists in our map.
+        if col.casefold() not in actual_map:
+            raise ValueError(f"Configuration Error: Column '{col}' not found in the table.")
+        # Get the actual column name with its original casing.
+        resolved_name = actual_map[col.casefold()]
+        if force_upper:
+            resolved_name = resolved_name.upper()
+        resolved.append(resolved_name)
+    return resolved
+
+def trim_to_bytes(s, max_bytes, encoding='utf-8'):
+    """
+    Trims a string to a maximum number of bytes, safely handling multi-byte
+    characters (like emojis or special symbols) to prevent cutting a character in half.
+    """
+    encoded_s = s.encode(encoding)
+    if len(encoded_s) <= max_bytes:
+        return s
+    # Trim the byte representation and decode it, ignoring errors from incomplete characters.
+    return encoded_s[:max_bytes].decode(encoding, errors='ignore')
+
+def format_value(val, max_db_bytes=255):
+    """
+    Formats a value before inserting it into the results table. It converts the value
+    to a string and trims it to a max byte length to prevent database errors (e.g.,
+    'value too long for type character varying(255)').
+    """
+    if pd.isna(val):
+        return "NULL" # Represent pandas Not a Number/Null as a string "NULL".
+    val_str = str(val)
+    return trim_to_bytes(val_str, max_db_bytes)
+
+def is_empty(val):
+    """A helper function to check if a value is null, NaN, or just an empty/whitespace string."""
+    return pd.isna(val) or str(val).strip() == ""
+
+def compare_rows(df, compare_cols, keys, table):
+    """
+    Compares rows in a merged DataFrame (containing data from both Snowflake and Vertica)
+    and identifies any discrepancies.
+    """
+    mismatches = []
+    # Iterate through each row of the merged DataFrame.
+    for _, row in df.iterrows():
+        # Construct a key string for logging purposes (e.g., "ID=123, CODE=ABC").
+        row_keys = ", ".join([
+            str(row.get(f"{k}_sf")) if not pd.isna(row.get(f"{k}_sf"))
+            else str(row.get(f"{k}_vt")) for k in keys
+        ])
+
+        # --- Check for rows that are missing entirely from one source ---
+        # This happens when the 'outer' merge results in all columns from one source being null.
+        is_entirely_missing_in_vt = all(is_empty(row.get(f"{col}_vt")) for col in compare_cols) and any(not is_empty(row.get(f"{col}_sf")) for col in compare_cols)
+        is_entirely_missing_in_sf = all(is_empty(row.get(f"{col}_sf")) for col in compare_cols) and any(not is_empty(row.get(f"{col}_vt")) for col in compare_cols)
         
-        # A try/except/finally block is essential for database operations to ensure
-        # the connection is always closed, even if errors occur.
-        try:
-            conn = self._connect_to_vertica(creds['host'], creds['db'], creds['user'], creds['password'])
-            self.log_message("Connection successful.", "SUCCESS")
-            
-            # Use a 'with' statement for the cursor, which handles closing it automatically.
-            with conn.cursor() as cur:
-                self.log_message(f"Fetching tables from schema '{creds['schema']}'...")
-                # SQL to get all table names from the specified schema.
-                cur.execute("SELECT table_name FROM v_catalog.tables WHERE table_schema = %s", (creds['schema'],))
-                tables = [row[0] for row in cur.fetchall()] # Extract table names from query results
-                
-                self.log_message(f"Found {len(tables)} tables. Fetching their columns...")
-                # Loop through each table to get its columns.
-                for i, table in enumerate(tables):
-                    self.log_message(f"Processing table {i+1}/{len(tables)}: {table}")
-                    # SQL to get all column names for the current table.
-                    cur.execute("SELECT column_name FROM v_catalog.columns WHERE table_schema = %s AND UPPER(table_name) = UPPER(%s)", (creds['schema'], table))
-                    columns = [row[0] for row in cur.fetchall()]
-                    # For each column, create a record and add it to our data list.
-                    for col in columns:
-                        all_data.append({'table_name': table, 'column_name': col})
+        # Log if the row is missing in Vertica.
+        if is_entirely_missing_in_vt:
+            mismatches.append({
+                "TableName": table, "ColumnName": "Row is Missing",
+                "ValueInVertica": "Missing in Vertica", "ValueInSnowflake": "Present",
+                "Key": row_keys
+            })
+            continue # Move to the next row
 
-            # Once all data is fetched, convert the list of dictionaries to a pandas DataFrame.
-            df = pd.DataFrame(all_data)
-            # Save the DataFrame to an Excel file, without the pandas index column.
-            df.to_excel(self.input_file, index=False)
-            self.log_message(f"Successfully created '{self.input_file}' with {len(df)} total columns.", "SUCCESS")
-            return True # Signal success
+        # Log if the row is missing in Snowflake.
+        if is_entirely_missing_in_sf:
+            mismatches.append({
+                "TableName": table, "ColumnName": "Row is Missing",
+                "ValueInVertica": "Present", "ValueInSnowflake": "Missing in Snowflake",
+                "Key": row_keys
+            })
+            continue # Move to the next row
 
-        except Exception as e:
-            # If any error occurs during the process, log it and show a popup.
-            self.log_message(f"An error occurred: {e}", "ERROR")
-            messagebox.showerror("Vertica Error", f"Failed to fetch data from Vertica:\n\n{e}")
-            return False # Signal failure
-        finally:
-            # This block *always* runs, whether there was an error or not.
-            if conn:
-                conn.close()
-                self.log_message("Connection to Vertica closed.")
+        # --- Check for mismatched values in individual columns ---
+        for col in compare_cols:
+            val_sf = row.get(f"{col}_sf")
+            val_vt = row.get(f"{col}_vt")
 
-    def initialize_data_source(self):
+            # If both values are null, they match, so we can skip.
+            if pd.isna(val_sf) and pd.isna(val_vt):
+                continue
+
+            # A mismatch occurs if:
+            # 1. One value is null but the other is not.
+            # 2. Neither are null, but their string representations (trimmed and lowercased) are different.
+            if pd.isna(val_sf) != pd.isna(val_vt) or (
+                not pd.isna(val_sf) and not pd.isna(val_vt) and
+                str(val_sf).strip().casefold() != str(val_vt).strip().casefold()
+            ):
+                mismatches.append({
+                    "TableName": table, "ColumnName": col,
+                    "ValueInVertica": format_value(val_vt),
+                    "ValueInSnowflake": format_value(val_sf),
+                    "Key": row_keys
+                })
+
+    return mismatches
+
+def compare_table(table, config_df, sf_conn, vt_conn, vt_conn_2, summary):
+    """
+    This is the main orchestration function for comparing a single table.
+    It handles configuration, pre-checks, batching, and invoking the comparison logic.
+    """
+    print(f"--- Starting comparison for table: {table} ---")
+    
+    # --- 1. Read Configuration for this Specific Table ---
+    # Filter the main config DataFrame to get settings for the current table.
+    sub = config_df[config_df["Table Name"].str.casefold() == table.casefold()]
+    
+    # Check for the 'stage' flag, which means we should skip this table entirely.
+    if (sub["Flag"].str.casefold() == "stage").any():
+        summary.append(f"Table '{table}': Skipped (Flagged as 'stage')")
+        print(f"Skipping table '{table}' as it is flagged as 'stage'.")
+        return
+
+    # Extract lists of key, exclude, and filter columns from the config.
+    key_cols = sub[sub["Flag"].str.casefold() == "key"]["Column Name"].tolist()
+    exclude_cols = sub[sub["Flag"].str.casefold() == "exclude"]["Column Name"].tolist()
+    filter_cols = sub[sub["Flag"].str.casefold() == "filter"]["Column Name"].tolist()
+    filter_col = filter_cols[0] if filter_cols else None
+    
+    if filter_col:
+        print(f"[INFO] Applying filter on column '{filter_col}' >= '{START_DATETIME}'.")
+
+    # A table must have key columns defined to be comparable.
+    if not key_cols:
+        summary.append(f"Table '{table}': Skipped (No key columns defined in config)")
+        print(f"[ERROR] Skipping table '{table}' because no key columns were defined in the config.")
+        return
+    
+    # --- 2. Perform Pre-Checks (Row Counts) ---
+    print(f"[INFO] Performing initial row count check for table '{table}'...")
+    sf_count = get_row_count(sf_conn, table, SCHEMA, filter_col, START_DATETIME)
+    vt_count = get_row_count(vt_conn, table, SCHEMA, filter_col, START_DATETIME)
+    print(f"[INFO] Row Counts -> Snowflake: {sf_count}, Vertica: {vt_count}")
+
+    # Handle cases where one or both tables are empty.
+    data_to_insert = None
+    if sf_count == 0 and vt_count > 0:
+        summary.append(f"Table '{table}': Logged as empty in Snowflake (Vertica has {vt_count} rows)")
+        print(f"[!!] Table '{table}' is empty in Snowflake but not in Vertica. Logging and skipping detailed comparison.")
+        data_to_insert = [(table, 'EmptyTable', f'{vt_count} rows', 'Empty', 'Table is empty in Snowflake')]
+    elif vt_count == 0 and sf_count > 0:
+        summary.append(f"Table '{table}': Logged as empty in Vertica (Snowflake has {sf_count} rows)")
+        print(f"[!!] Table '{table}' is empty in Vertica but not in Snowflake. Logging and skipping detailed comparison.")
+        data_to_insert = [(table, 'EmptyTable', 'Empty', f'{sf_count} rows', 'Table is empty in Vertica')]
+    elif sf_count == 0 and vt_count == 0:
+        summary.append(f"Table '{table}': Skipped (Empty in both sources)")
+        print(f"Skipping table '{table}' as it's empty in both sources.")
+        return
+
+    # If we found an empty-table discrepancy, insert it and stop processing this table.
+    if data_to_insert:
+        insert_query = """
+            INSERT INTO ER1.vertica_snowflake_table_data_comparison
+            (table_name, column_name, value_in_vertica, value_in_snowflake, unique_key)
+            VALUES (%s, %s, %s, %s, %s)
         """
-        Orchestrates the initial data setup. It gets credentials and then
-        triggers the creation of the input file from Vertica. If this process
-        fails at any point, the application will close.
-        """
-        creds = self._get_db_credentials()
-        if not creds:
-            self.root.destroy() # Close the app if credentials are not found
-            return
-
-        # Attempt to create the input file from the database.
-        if self._create_input_file_from_vertica(creds):
-            # If successful, check if an output file exists. If not, create an empty one
-            # with the correct headers. This prevents errors when trying to append to it later.
-            if not os.path.exists(self.output_file):
-                pd.DataFrame(columns=['table_name', 'flag', 'column_name']).to_excel(self.output_file, index=False)
-            # Now that the input file is ready, load its data into the application.
-            self.load_data()
-        else:
-            # If creating the input file fails, close the application.
-            self.root.destroy()
-
-    def setup_styles(self):
-        """
-        Configures the visual style for all ttk (themed tkinter) widgets.
-        Centralizing style definitions here makes it easy to change the app's
-        look and feel without searching through the widget creation code.
-        """
-        self.style = ttk.Style(self.root)
-        self.style.theme_use('clam') # 'clam' is a clean, modern theme
-
-        # Define custom fonts for different elements.
-        self.title_font = font.Font(family="Helvetica", size=16, weight="bold")
-        self.label_font = font.Font(family="Helvetica", size=12)
-        self.bold_label_font = font.Font(family="Helvetica", size=12, weight="bold")
-        self.log_font = font.Font(family="Courier", size=10) # Monospaced font for logs
-
-        # Configure styles for specific widget types.
-        self.style.configure('TFrame', background='#f0f0f0') # Light grey background
-        self.style.configure('TLabel', background='#f0f0f0', font=self.label_font)
-        self.style.configure('Title.TLabel', font=self.title_font, foreground='#333')
-        self.style.configure('Header.TLabel', font=self.bold_label_font, foreground='#003366')
-        self.style.configure('TRadiobutton', background='#f0f0f0', font=self.label_font)
-        self.style.configure('TCheckbutton', background='#f0f0f0', font=self.label_font)
-        self.style.configure('TButton', font=self.label_font, padding=6)
+        with vt_conn_2.cursor() as cur:
+            cur.executemany(insert_query, data_to_insert)
+        return
         
-        # Use .map() to define styles for different widget states (e.g., when a button is active).
-        self.style.map('TButton',
-            foreground=[('active', 'white'), ('!disabled', '#333')],
-            background=[('active', '#0078d7'), ('!disabled', '#e0e0e0')]
-        )
-        # Create a special style for the "Finish" button to make it stand out.
-        self.style.configure('Success.TButton', background='#28a745', foreground='white')
-        self.style.map('Success.TButton', background=[('active', '#218838')])
+    # --- 3. Resolve Column Names and Define Comparison Scope ---
+    # Get column metadata from both databases.
+    sf_cols_map = get_snowflake_columns_and_types(sf_conn, table)
+    vt_cols_map = get_vertica_columns_and_types(vt_conn, table)
+    
+    sf_cols = list(sf_cols_map.keys())
+    vt_cols = list(vt_cols_map.keys())
 
-    def create_widgets(self):
+    # Find the set of common columns (case-insensitive).
+    sf_norm_map = {col.casefold(): col for col in sf_cols}
+    vt_norm_map = {col.casefold(): col for col in vt_cols}
+    common_norm = set(sf_norm_map.keys()) & set(vt_norm_map.keys())
+    common_cols = [sf_norm_map[n] for n in common_norm] # Get original casing
+    all_cols = list(set(sf_cols + vt_cols)) # All unique columns from both sources
+
+    # Resolve the final lists of keys and columns to exclude.
+    keys = resolve_columns(key_cols, all_cols, force_upper=True)
+    excludes_from_excel = resolve_columns(exclude_cols, all_cols, force_upper=True) if exclude_cols else []
+    final_excludes = list(set(excludes_from_excel) | set(DEFAULT_EXCLUDE_COLS)) # Combine default and Excel excludes
+    
+    # The final list of columns to compare is what's common, minus keys and excludes.
+    compare_cols = [col for col in common_cols if col.upper() not in keys + final_excludes]
+    
+    # --- 4. Set up Batch Processing ---
+    total_cols_to_fetch = len(keys) + len(compare_cols)
+    dynamic_batch_size = calculate_dynamic_batch_size(total_cols_to_fetch)
+    print(f"[INFO] Using dynamic batch size: {dynamic_batch_size} for {total_cols_to_fetch} total columns.")
+
+    def fetch_df_batch(conn, dbtype, limit, offset):
         """
-        Creates and lays out all the GUI widgets. The layout is managed using
-        .pack() and .grid() within different frames for organization.
-        """
-        # --- Main Container Frame ---
-        # All other widgets will be placed inside this frame.
-        main_frame = ttk.Frame(self.root, padding="20")
-        main_frame.pack(fill=tk.BOTH, expand=True) # Fill all available space
-
-        # --- Top Frame (Table Name and Flag Selection) ---
-        top_frame = ttk.Frame(main_frame, padding="10")
-        top_frame.pack(fill=tk.X, pady=(0, 10))
-        top_frame.columnconfigure(1, weight=1) # Let the second column expand
-        
-        ttk.Label(top_frame, text="Current Table:", style='Header.TLabel').grid(row=0, column=0, sticky="w", pady=(0,10))
-        self.table_name_label = ttk.Label(top_frame, text="Loading...", style='Title.TLabel') # Will be updated with the table name
-        self.table_name_label.grid(row=0, column=1, sticky="w", pady=(0,10))
-
-        ttk.Label(top_frame, text="Select Flag:", style='Header.TLabel').grid(row=1, column=0, sticky="w", pady=(5,10))
-        self.flag_var = tk.StringVar() # This variable will hold the value of the selected radio button.
-        self.flag_frame = ttk.Frame(top_frame) # A frame to hold the radio buttons together
-        self.flag_frame.grid(row=1, column=1, sticky="w")
-        
-        # Radio buttons for selecting the configuration flag.
-        # The 'command' calls self.on_flag_change whenever a selection is made.
-        ttk.Radiobutton(self.flag_frame, text="Key", variable=self.flag_var, value="key", command=self.on_flag_change).pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(self.flag_frame, text="Exclude", variable=self.flag_var, value="exclude", command=self.on_flag_change).pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(self.flag_frame, text="Stage (Skip Table)", variable=self.flag_var, value="stage", command=self.on_flag_change).pack(side=tk.LEFT, padx=5)
-
-        # --- Columns Frame (Scrollable list of checkboxes) ---
-        # This is a complex widget to create a scrollable area.
-        columns_outer_frame = ttk.Frame(main_frame)
-        columns_outer_frame.pack(fill=tk.BOTH, expand=True, pady=10)
-        ttk.Label(columns_outer_frame, text="Select Columns (if applicable):", style='Header.TLabel').pack(anchor="w", padx=10)
-        
-        # A Canvas widget is used to create a scrollable region.
-        canvas = tk.Canvas(columns_outer_frame, bg='#ffffff', highlightthickness=0)
-        scrollbar = ttk.Scrollbar(columns_outer_frame, orient="vertical", command=canvas.yview)
-        # This frame is placed *inside* the canvas and will hold the actual checkboxes.
-        self.columns_frame = ttk.Frame(canvas, style='TFrame')
-        
-        # This binding is crucial: when the size of the inner frame changes, it tells the canvas to update its scroll region.
-        self.columns_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        # Create a "window" on the canvas to display the inner frame.
-        canvas.create_window((0, 0), window=self.columns_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        
-        # Pack the canvas and scrollbar to make them visible and functional.
-        canvas.pack(side="left", fill="both", expand=True, padx=(10,0), pady=5)
-        scrollbar.pack(side="right", fill="y", padx=(0,10), pady=5)
-
-        # --- Action Frame (Navigation and Control Buttons) ---
-        action_frame = ttk.Frame(main_frame)
-        action_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(10, 0))
-        # Configure columns to have equal weight so buttons spread out evenly.
-        action_frame.columnconfigure((0, 1, 2, 3), weight=1)
-
-        self.prev_button = ttk.Button(action_frame, text="Previous Table", command=self.previous_table)
-        self.prev_button.grid(row=0, column=0, padx=5, sticky="ew") # "ew" makes the button stretch horizontally
-
-        self.apply_button = ttk.Button(action_frame, text="Apply Selections", command=self.apply_selection)
-        self.apply_button.grid(row=0, column=1, padx=5, sticky="ew")
-
-        self.next_button = ttk.Button(action_frame, text="Next Table", command=self.next_table)
-        self.next_button.grid(row=0, column=2, padx=5, sticky="ew")
-        
-        self.finish_button = ttk.Button(action_frame, text="Finish & Save", command=self.finalize_process, style='Success.TButton')
-        self.finish_button.grid(row=0, column=3, padx=5, sticky="ew")
-
-        # --- Log Frame (For displaying status messages) ---
-        log_frame = ttk.LabelFrame(main_frame, text="Log", padding=10) # A frame with a border and title
-        log_frame.pack(fill=tk.BOTH, expand=True, side=tk.BOTTOM, pady=(15,0))
-        # The Text widget will display log messages. It's set to DISABLED to be read-only for the user.
-        self.log_text = tk.Text(log_frame, height=8, wrap=tk.WORD, state=tk.DISABLED, font=self.log_font, bg="#fdfdfd", relief=tk.SOLID, borderwidth=1)
-        self.log_text.pack(fill=tk.BOTH, expand=True)
-
-    def log_message(self, message, level="INFO"):
-        """
-        A helper function to safely add messages to the log Text widget.
-        It temporarily enables the widget, adds text, and then disables it again.
-        """
-        self.log_text.config(state=tk.NORMAL) # Must be NORMAL to modify
-        self.log_text.insert(tk.END, f"[{level}] {message}\n")
-        self.log_text.config(state=tk.DISABLED) # Set back to DISABLED for read-only
-        self.log_text.see(tk.END) # Automatically scroll to the bottom
-
-    def load_data(self):
-        """
-        Reads the input Excel file using pandas and processes it into the
-        application's main data structure (self.table_data).
-        """
-        try:
-            df = pd.read_excel(self.input_file)
-            # Basic validation of the input file format.
-            if 'table_name' not in df.columns or 'column_name' not in df.columns:
-                messagebox.showerror("Error", "Input Excel must contain 'table_name' and 'column_name' columns.")
-                self.root.quit()
-                return
-            
-            # This is the core data processing step:
-            # - df.groupby('table_name'): Groups all rows by their table name.
-            # - ['column_name'].apply(list): For each group, it takes the 'column_name' series and turns it into a list.
-            # - .to_dict(): Converts the result into a dictionary.
-            # The result is self.table_data = {'TableA': ['col1', 'col2'], 'TableB': ['col_x']}
-            self.table_data = df.groupby('table_name')['column_name'].apply(list).to_dict()
-            self.table_names = list(self.table_data.keys()) # Get a list of just the table names for navigation.
-
-            if not self.table_names:
-                # Handle the case where the input file is empty or has no data.
-                messagebox.showerror("Error", "No data found in the input file.")
-                self.apply_button.config(state=tk.DISABLED)
-                self.next_button.config(state=tk.DISABLED)
-            else:
-                # If data is loaded successfully, display the first table.
-                self.display_current_table()
-                self.log_message(f"Successfully loaded {len(self.table_names)} tables from '{self.input_file}'.")
-
-        except Exception as e:
-            messagebox.showerror("Error", f"An error occurred while loading data: {e}")
-            self.root.quit()
-
-    def display_current_table(self):
-        """
-        Updates the UI to show the data for the current table. This function is
-        called whenever the user navigates to a new table.
-        """
-        # --- Clean up previous state ---
-        # Destroy all old checkboxes from the previous table.
-        for widget in self.columns_frame.winfo_children():
-            widget.destroy()
-        self.column_vars.clear() # Clear the list of checkbox variables
-        self.is_table_staged = False # Reset the 'stage' flag for the new table
-
-        # --- Update UI elements ---
-        # Enable/disable Prev/Next buttons based on the current position in the list.
-        self.prev_button.config(state=tk.NORMAL if self.current_table_index > 0 else tk.DISABLED)
-        self.next_button.config(state=tk.NORMAL)
-        self.apply_button.config(state=tk.NORMAL)
-        
-        # Get the name and columns for the current table.
-        table_name = self.table_names[self.current_table_index]
-        columns = self.table_data[table_name]
-        
-        # Update the main title label with the current table's name.
-        self.table_name_label.config(text=table_name)
-        self.log_message(f"--- Now processing table: '{table_name}' ({self.current_table_index + 1}/{len(self.table_names)}) ---")
-        
-        # --- Dynamically create checkboxes for columns ---
-        # Loop through each column of the current table.
-        for i, col in enumerate(columns):
-            var = tk.IntVar() # Create a tkinter variable for the checkbox state (0=off, 1=on).
-            # Create the Checkbutton widget.
-            cb = ttk.Checkbutton(self.columns_frame, text=col, variable=var)
-            cb.grid(row=i, column=0, sticky='w', padx=10, pady=2)
-            # Store both the variable and the column name for later retrieval.
-            self.column_vars.append((var, col))
-            
-        # Reset the UI controls (radio buttons, etc.) for the new table.
-        self.reset_ui_for_new_selection()
-
-    def reset_ui_for_new_selection(self):
-        """
-        Resets the UI controls on the current table screen, usually after applying
-        a selection, so the user can make another selection on the same table.
-        """
-        self.flag_var.set("") # Deselect all radio buttons.
-        # Uncheck all column checkboxes.
-        for var, _ in self.column_vars:
-            var.set(0)
-        # Trigger the on_flag_change logic to ensure column checkboxes are enabled/disabled correctly.
-        self.on_flag_change()
-        # Ensure the Apply button and radio buttons are enabled.
-        self.apply_button.config(state=tk.NORMAL)
-        for child in self.flag_frame.winfo_children():
-            child.config(state=tk.NORMAL)
-
-    def on_flag_change(self):
-        """
-        This is a callback function that runs whenever a radio button is clicked.
-        It enables or disables the column checkboxes based on the selection.
-        """
-        selected_flag = self.flag_var.get()
-        # Checkboxes should only be active if the flag is 'key' or 'exclude'.
-        # If the flag is 'stage', they are irrelevant and should be disabled.
-        state = tk.NORMAL if selected_flag in ["key", "exclude"] else tk.DISABLED
-        
-        # Loop through all widgets in the columns frame and update their state.
-        for widget in self.columns_frame.winfo_children():
-            if isinstance(widget, ttk.Checkbutton):
-                widget.config(state=state)
-
-    def apply_selection(self):
-        """
-        Called when the "Apply Selections" button is clicked. It validates the
-        user's input and adds the configuration to the output_records buffer.
-        """
-        flag = self.flag_var.get()
-        # 1. Validation: Ensure a flag is selected.
-        if not flag:
-            messagebox.showwarning("Selection Missing", "You must select a flag (Key, Exclude, or Stage) before applying.")
-            return
-            
-        table_name = self.table_names[self.current_table_index]
-        # Get a list of all column names that have their checkbox ticked.
-        selected_columns = [col_name for var, col_name in self.column_vars if var.get() == 1]
-        
-        # 2. Validation: If flag is 'key' or 'exclude', ensure at least one column is selected.
-        if flag in ["key", "exclude"] and not selected_columns:
-            messagebox.showwarning("Selection Missing", f"You must select one or more columns to mark as '{flag}'.")
-            return
-            
-        # 3. Process the selection based on the chosen flag.
-        if flag == "stage":
-            # If 'stage', add a single record for the whole table.
-            self.output_records.append({'table_name': table_name, 'flag': 'stage', 'column_name': None})
-            self.log_message(f"Table '{table_name}' marked as 'stage'. It will be skipped.", "SUCCESS")
-            self.is_table_staged = True
-            # Disable further actions on this table since it's being skipped.
-            self.apply_button.config(state=tk.DISABLED)
-            for child in self.flag_frame.winfo_children():
-                child.config(state=tk.DISABLED)
-        else:
-            # If 'key' or 'exclude', create a record for each selected column.
-            for col in selected_columns:
-                self.output_records.append({'table_name': table_name, 'flag': flag, 'column_name': col})
-                self.log_message(f"Column '{col}' in table '{table_name}' marked as '{flag}'.")
-            # After applying, reset the UI so the user can flag other columns in the same table.
-            self.reset_ui_for_new_selection()
-
-    def save_records_to_excel(self, is_final=False):
-        """
-        Saves the records currently buffered in self.output_records to the Excel file.
-        This is called when moving between tables or when finishing the process.
-        """
-        # If there are no new records to save, just return.
-        if not self.output_records:
-            if is_final: # Only show a warning if it's the final save attempt.
-                messagebox.showwarning("Nothing to Save", "No new configurations were applied.")
-            return False if is_final else True # Signal whether the process should continue.
-            
-        try:
-            # Create a DataFrame from the list of new records.
-            new_df = pd.DataFrame(self.output_records)
-            
-            # Try to read the existing output file. If it exists, we'll append to it.
-            try:
-                existing_df = pd.read_excel(self.output_file)
-                # Concatenate the old and new DataFrames.
-                combined_df = pd.concat([existing_df, new_df], ignore_index=True)
-            except (FileNotFoundError, ValueError):
-                # If the file doesn't exist or is empty/corrupt, the new DataFrame is the only one.
-                combined_df = new_df
-            
-            # Save the combined DataFrame back to the Excel file.
-            combined_df.to_excel(self.output_file, index=False)
-            
-            if self.output_records:
-                self.log_message(f"Saved {len(self.output_records)} new configurations to '{self.output_file}'.", "SUCCESS")
-            
-            # IMPORTANT: Clear the buffer after saving to prevent saving the same records again.
-            self.output_records.clear()
-            return True # Signal success
-            
-        except Exception as e:
-            messagebox.showerror("Save Error", f"Failed to save output file: {e}")
-            return False # Signal failure
-
-    def previous_table(self):
-        """
-        Handles the "Previous Table" button click.
-        """
-        # First, save any pending changes for the current table.
-        self.save_records_to_excel()
-        # Navigate to the previous index if we are not at the beginning.
-        if self.current_table_index > 0:
-            self.current_table_index -= 1
-            self.display_current_table() # Redraw the UI for the new table.
-            self.log_message(f"Moved back to previous table.")
-
-    def next_table(self):
-        """
-        Handles the "Next Table" button click.
-        """
-        # First, save any pending changes for the current table.
-        self.save_records_to_excel()
-        # Navigate to the next index if we are not at the end.
-        if self.current_table_index < len(self.table_names) - 1:
-            self.current_table_index += 1
-            self.display_current_table() # Redraw the UI for the new table.
-        else:
-            # If the user is on the last table, inform them and disable the 'Next' button.
-            self.log_message("Reached the last table. Click 'Finish & Save' to complete.", "INFO")
-            self.next_button.config(state=tk.DISABLED)
-            messagebox.showinfo(
-                "Process Complete",
-                "You have reached the last table.\n\n"
-                "You can still use the 'Previous Table' button to review or change earlier selections.\n\n"
-                "When you are finished, click 'Finish & Save' to generate the output file and exit."
-            )
-
-    def finalize_process(self):
-        """
-        Handles the "Finish & Save" button click. This is the final step.
-        """
-        # Perform one last save to catch any unapplied changes on the last table.
-        if self.save_records_to_excel(is_final=True):
-            final_msg = f"Configuration complete! All data saved to '{self.output_file}'."
-            self.log_message(final_msg, "SUCCESS")
-            self.table_name_label.config(text="All Done! ✅")
-            
-            # Disable the main action buttons to prevent further edits.
-            for btn in [self.apply_button, self.next_button, self.prev_button]:
-                btn.config(state=tk.DISABLED)
-                
-            # Ask the user if they want to close the application.
-            if messagebox.askokcancel("Success", f"{final_msg}\n\nDo you want to close the application?"):
-                self.root.quit()
-
-# --- Application Entry Point ---
-# The standard Python entry point. This code runs only when the script is executed directly.
-if __name__ == "__main__":
-    # 1. Create the root (main) window for the application.
-    root = tk.Tk()
-    # 2. Create an instance of our application class, passing the root window to it.
-    app = MigrationConfiguratorApp(root)
-    # 3. Start the tkinter event loop. This makes the window appear and become interactive.
-    #    The script will stay in this loop until the window is closed.
-    root.mainloop()
-
+    
